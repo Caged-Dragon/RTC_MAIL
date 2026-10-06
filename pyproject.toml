@@ -1,7 +1,15 @@
 [project]
 name = "rtcrackers-mail-deployment"
-version = "1.0.0"
-requires-python = ">=3.12"
+version = "1.0.1"
+description = "RT Crackers Mail FastAPI application for Vercel"
+requires-python = "~=3.12.0"
+dependencies = [
+  "fastapi[standard]>=0.115,<1",
+  "httpx>=0.28,<1",
+  "python-dotenv>=1.0,<2",
+  "svix>=1.50,<2",
+  "psycopg[binary]>=3.2,<4",
+]
 
 [tool.vercel]
 entrypoint = "mail.main:app"
