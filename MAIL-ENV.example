@@ -1,15 +1,24 @@
+# Copy to .env for local runs. On Vercel, add the same names under Project Settings > Environment Variables.
+# Never commit .env.
+
 # --- Resend ---
 RESEND_API_KEY=
+# Required in production: signing secret of the Resend webhook for `email.received`
 RESEND_WEBHOOK_SECRET=
 MAIL_DOMAIN=rtcrackers.com
 
 # --- Supabase ---
+# Postgres connection string (Supabase > Connect > Transaction pooler, port 6543). Server-side only.
 DATABASE_URL=
-SUPABASE_URL=https://ypmiinmkyvzdpakbkers.supabase.co
+# https://ypmiinmkyvzdpakbkers.supabase.co  (project ref: ypmiinmkyvzdpakbkers)
+SUPABASE_URL=
+# Publishable / anon key (Settings > API Keys). Safe to be public; NOT the service_role / secret key.
 SUPABASE_ANON_KEY=
 
+# Optional: seconds one /api/sync call may spend downloading mail (default 45)
 SYNC_BUDGET_SECONDS=45
 
+# Production order email settings
 ORDER_FROM_EMAIL=RT Crackers <orders@rtcrackers.com>
-ORDER_SITE_URL=https://cart.rtcrackers.com
-ADMIN_SITE_URL=https://admin.rtcrackers.com
+ORDER_SITE_URL=https://your-cart-domain.example
+ADMIN_SITE_URL=https://your-admin-domain.example

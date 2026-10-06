@@ -4,7 +4,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from mailcore.routes import router
+try:
+    from .mailcore.routes import router
+except ImportError:
+    # Keeps `uvicorn main:app` working when running from the mail/ directory.
+    from mailcore.routes import router
 
 PUBLIC = Path(__file__).resolve().parent / "public"
 
