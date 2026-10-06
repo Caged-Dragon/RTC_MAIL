@@ -1,0 +1,52 @@
+<!doctype html><a class="skip-link" href="#main-content">Skip to main content</a>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="theme-color" content="#092b63">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RT Crackers Mail</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app" id="app" role="application" data-rtc-component="inbox">
+    <aside class="side" data-rtc-component="sidebar">
+      <div class="brand">RT Crackers<span>Mail</span></div>
+      <div class="boxes" id="boxes" role="tablist" aria-label="Mailboxes"></div>
+      <button class="compose-btn" id="composeBtn">Compose</button>
+      <nav class="nav">
+        <button data-view="inbox">Inbox <b id="inboxCount"></b></button>
+        <button data-view="sent">Sent</button>
+      </nav>
+      <div class="side-foot">
+        <button class="ghost" id="syncBtn">Sync inbox</button>
+        <button class="ghost small" id="fullSyncBtn" title="Walk back through older mail in Resend">Import older mail</button>
+        <div class="status" id="status"></div>
+        <div class="who"><span id="who"></span><button class="link" id="signOutBtn">Sign out</button></div>
+      </div>
+    </aside>
+
+    <section class="list" id="listPane" data-rtc-component="message_list">
+      <header class="list-head">
+        <h2 id="listTitle">Inbox</h2>
+        <input type="search" id="search" placeholder="Search this folder" aria-label="Search">
+      </header>
+      <div class="rows" id="rows"></div>
+    </section>
+
+    <section class="reader" id="readerPane" data-rtc-component="reader"></section>
+  </div>
+  <div class="login" id="login" hidden data-rtc-component="login_card">
+    <div class="login-card">
+      <div class="brand">RT Crackers<span>Mail</span></div>
+      <label for="lEmail">Email</label>
+      <input id="lEmail" type="email" autocomplete="username">
+      <label for="lPass">Password</label>
+      <input id="lPass" type="password" autocomplete="current-password">
+      <div class="login-err" id="lErr" role="alert"></div>
+      <button class="btn" id="lBtn">Sign in</button>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# --- Resend ---
+RESEND_API_KEY=
+RESEND_WEBHOOK_SECRET=
+MAIL_DOMAIN=rtcrackers.com
+
+# --- Supabase ---
+DATABASE_URL=
+SUPABASE_URL=https://ypmiinmkyvzdpakbkers.supabase.co
+SUPABASE_ANON_KEY=
+
+SYNC_BUDGET_SECONDS=45
+
+ORDER_FROM_EMAIL=RT Crackers <orders@rtcrackers.com>
+ORDER_SITE_URL=https://cart.rtcrackers.com
+ADMIN_SITE_URL=https://admin.rtcrackers.com
