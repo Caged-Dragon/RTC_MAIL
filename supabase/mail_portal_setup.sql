@@ -1,7 +1,4 @@
 -- RT Crackers Mail portal extension for the existing production Supabase project.
--- Safe to apply alongside the ecommerce schema. It does NOT replace or modify
--- products, orders, company_profile, offers, or customer tables.
-
 do $$ begin
   create type public.mail_direction as enum ('inbound','outbound');
 exception when duplicate_object then null; end $$;
@@ -119,9 +116,7 @@ from (values
 ) as x(purpose_code,email_address,display_name,is_primary)
 join public.business_email_purposes p on p.purpose_code=x.purpose_code
 on conflict (email_address) do update
-set display_name=excluded.display_name,
-    is_active=true,
-    is_primary=excluded.is_primary;
+set display_name=excluded.display_name, is_active=true, is_primary=excluded.is_primary;
 
 insert into public.mailboxes
   (business_email_id,business_id,email_address,local_part,display_name,mailbox_type)
@@ -145,29 +140,3 @@ set email_address=excluded.email_address,
     display_name=excluded.display_name,
     mailbox_type=excluded.mailbox_type,
     updated_at=now();
-
-
--- Production rule: only these ten RT Crackers addresses are used by the mail website.
-update public.business_email_addresses
-set is_active=false, is_primary=false
-where email_address not in (
- 'admin@rtcrackers.com','sales@rtcrackers.com','support@rtcrackers.com','account@rtcrackers.com',
- 'noreply@rtcrackers.com','billing@rtcrackers.com','contact@rtcrackers.com','help@rtcrackers.com',
- 'info@rtcrackers.com','orders@rtcrackers.com'
-);
-
--- The existing production admin allow-list remains the authority.
--- Mailbox access can be granted later by inserting an auth user's UUID here.
-alter table public.business_email_purposes enable row level security;
-alter table public.business_email_addresses enable row level security;
-alter table public.mailboxes enable row level security;
-alter table public.mailbox_access enable row level security;
-alter table public.email_messages enable row level security;
-alter table public.email_recipients enable row level security;
-
-revoke all on public.business_email_purposes from anon, authenticated;
-revoke all on public.business_email_addresses from anon, authenticated;
-revoke all on public.mailboxes from anon, authenticated;
-revoke all on public.mailbox_access from anon, authenticated;
-revoke all on public.email_messages from anon, authenticated;
-revoke all on public.email_recipients from anon, authenticated;

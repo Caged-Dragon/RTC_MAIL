@@ -19,8 +19,9 @@ SUPABASE_URL = _env("SUPABASE_URL").rstrip("/")
 SUPABASE_ANON_KEY = _env("SUPABASE_ANON_KEY")
 SYNC_BUDGET_SECONDS = float(_env("SYNC_BUDGET_SECONDS", "45"))
 
-# Local development / tests only. Ignored on Vercel so it can never switch auth off in production.
 DEV_NO_AUTH = _env("MAIL_DEV_NO_AUTH") == "1" and not os.getenv("VERCEL")
 
-# These are the only mailboxes used by the RT Crackers Mail website.
-REQUIRED_LOCALS = ["admin", "sales", "support", "account", "noreply", "billing", "contact", "help", "info", "orders"]
+REQUIRED_LOCALS = [
+    "admin", "sales", "support", "account", "noreply",
+    "billing", "contact", "help", "info", "orders",
+]

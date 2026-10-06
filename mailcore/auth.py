@@ -1,9 +1,4 @@
-"""Login through Supabase Auth + the current RT Crackers public.admin_access / mailbox_access tables.
-
-The browser never talks to Supabase directly: /api/auth/login proxies the password login, and every other
-request carries the Supabase access token, which is verified with Supabase's /auth/v1/user endpoint
-(works with both legacy and new JWT signing keys).
-"""
+"""Login through Supabase Auth + the current RT Crackers public.admin_access / mailbox_access tables."""
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -14,7 +9,7 @@ from fastapi import HTTPException, Request
 from . import config
 from .db import conn
 
-_TTL = 60  # seconds a verified token / permission set is trusted
+_TTL = 60
 _cache: dict[str, tuple[float, "User"]] = {}
 
 
@@ -23,7 +18,7 @@ class User:
     uid: str
     email: str
     is_admin: bool
-    mailbox_ids: set[int] = field(default_factory=set)  # empty + is_admin => all mailboxes
+    mailbox_ids: set[int] = field(default_factory=set)
 
     def can_access(self, mailbox_id: int, all_ids: set[int] | None = None) -> bool:
         return self.is_admin or mailbox_id in self.mailbox_ids
@@ -39,7 +34,6 @@ def _require_supabase():
 
 
 def fetch_user(token: str) -> dict | None:
-    """Ask Supabase who this token belongs to. Returns None when the token is invalid or expired."""
     _require_supabase()
     try:
         r = httpx.get(f"{config.SUPABASE_URL}/auth/v1/user", headers=_headers(token), timeout=10)
@@ -54,13 +48,10 @@ def fetch_user(token: str) -> dict | None:
 
 def load_permissions(uid: str, email: str) -> tuple[bool, set[int]]:
     with conn() as c:
-        # The current production database authorizes administrators by email in
-        # public.admin_access. Mailbox-level access remains optional.
         admin = c.execute(
             "select 1 from public.admin_access where lower(email)=lower(%s) and is_active=true", (email,)
         ).fetchone()
-        # The mail portal is intentionally restricted to the dedicated admin mailbox login.
-        admin = admin if email.lower() == 'admin@rtcrackers.com' else None
+        admin = admin if email.lower() == "admin@rtcrackers.com" else None
         rows = c.execute(
             "select mailbox_id from public.mailbox_access where auth_user_id=%s", (uid,)
         ).fetchall()
@@ -93,8 +84,8 @@ def current_user(request: Request) -> User:
 
 def password_login(email: str, password: str) -> dict:
     _require_supabase()
-    if email.strip().lower() != 'admin@rtcrackers.com':
-        raise HTTPException(403, 'Mail portal login is restricted to admin@rtcrackers.com')
+    if email.strip().lower() != "admin@rtcrackers.com":
+        raise HTTPException(403, "Mail portal login is restricted to admin@rtcrackers.com")
     return _token_call("password", {"email": email.strip(), "password": password})
 
 
@@ -105,8 +96,13 @@ def refresh(refresh_token: str) -> dict:
 
 def _token_call(grant: str, body: dict) -> dict:
     try:
-        r = httpx.post(f"{config.SUPABASE_URL}/auth/v1/token", params={"grant_type": grant},
-                       headers=_headers(), json=body, timeout=10)
+        r = httpx.post(
+            f"{config.SUPABASE_URL}/auth/v1/token",
+            params={"grant_type": grant},
+            headers=_headers(),
+            json=body,
+            timeout=10,
+        )
     except httpx.HTTPError:
         raise HTTPException(502, "Could not reach Supabase Auth")
     if r.status_code in (400, 401, 422):
@@ -114,5 +110,9 @@ def _token_call(grant: str, body: dict) -> dict:
     if r.is_error:
         raise HTTPException(502, "Supabase Auth error")
     d = r.json()
-    return {"access_token": d["access_token"], "refresh_token": d["refresh_token"],
-            "expires_in": d.get("expires_in", 3600), "email": (d.get("user") or {}).get("email", "")}
+    return {
+        "access_token": d["access_token"],
+        "refresh_token": d["refresh_token"],
+        "expires_in": d.get("expires_in", 3600),
+        "email": (d.get("user") or {}).get("email", ""),
+    }

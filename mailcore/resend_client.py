@@ -21,7 +21,6 @@ def _call(method: str, path: str, **kwargs):
         raise ResendError(400, "RESEND_API_KEY is not set. Add it to your .env file and restart.")
     headers = {"Authorization": f"Bearer {config.RESEND_API_KEY}", "User-Agent": "rtcrackers-mail/1.0"}
     for attempt in range(4):
-        # Resend's default limit is about 2 requests/second, so space calls out.
         wait = 0.55 - (time.monotonic() - _last_call)
         if wait > 0:
             time.sleep(wait)

@@ -1,8 +1,4 @@
-"""Mail logic on Supabase Postgres: discover mailboxes, pull received mail, send mail through Resend.
-
-Tables used (all already in your Supabase project): business_email_addresses (+ business_email_purposes),
-mailboxes, email_messages, email_recipients. Threads are not used (email_messages.thread_id stays null).
-"""
+"""Mail logic on Supabase Postgres: discover mailboxes, pull received mail, send mail through Resend."""
 import html as htmllib
 import re
 import time
@@ -13,16 +9,9 @@ from . import config, resend_client
 from .db import conn
 
 EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
-TYPE_FOR_PURPOSE = {"admin": "admin", "sales": "sales", "support": "support", "billing": "billing",
-                    "orders": "operations"}
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def norm_ts(value) -> datetime:
-    """Resend sends '2026-10-09 14:37:40.951732+00'. Return an aware UTC datetime."""
     if not value:
         return datetime.now(timezone.utc)
     s = str(value).strip().replace(" ", "T", 1)
@@ -51,18 +40,16 @@ def as_list(value) -> list:
     return [value] if isinstance(value, str) else list(value)
 
 
-# ---------- Mailboxes (driven by the business email table) ----------
-
 def ensure_mailboxes() -> None:
-    """Give every active business email address a mailbox row (idempotent; normally a no-op)."""
     with conn() as c:
         c.execute(
             """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
                select b.business_email_id,
                       (select min(business_id) from mailboxes),
                       lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
-                      case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales' when 'support' then 'support'
-                           when 'billing' then 'billing' when 'orders' then 'operations' else 'general' end::mailbox_type
+                      case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
+                           when 'support' then 'support' when 'billing' then 'billing'
+                           when 'orders' then 'operations' else 'general' end::mailbox_type
                from business_email_addresses b
                join business_email_purposes p using (email_purpose_id)
                where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
@@ -75,8 +62,6 @@ def ensure_mailboxes() -> None:
 
 
 def list_mailboxes(user=None) -> list[dict]:
-    """Active mailboxes whose address is an active row of business_email_addresses, unique by address.
-    The ten RT Crackers responsibility mailboxes are shown in configured business order."""
     with conn() as c:
         rows = c.execute(
             """select distinct on (m.email_address)
@@ -105,15 +90,12 @@ def _box_by_local(local: str, user, sending=False) -> dict:
     raise LookupError("Unknown mailbox")
 
 
-# ---------- Inbox ----------
-
 def _addr(raw: str) -> tuple[str, str]:
     name, a = parseaddr(raw or "")
     return name, a.strip().lower()
 
 
 def ingest_received(item: dict, boxes: dict | None = None) -> dict:
-    """Store one received email in every one of our mailboxes it was addressed to."""
     rid = item.get("id")
     result = {"new": 0, "known": False, "failed": 0, "ours": False}
     if not rid:
@@ -121,12 +103,13 @@ def ingest_received(item: dict, boxes: dict | None = None) -> dict:
     if boxes is None:
         boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
 
-    targets: list[dict] = []
+    targets = []
     for key in ("to", "cc", "bcc"):
         for raw in as_list(item.get(key)):
             box = boxes.get(_addr(raw)[1])
             if box and box not in targets:
                 targets.append(box)
+
     result["ours"] = bool(targets)
     if not targets:
         return result
@@ -144,16 +127,11 @@ def ingest_received(item: dict, boxes: dict | None = None) -> dict:
         if box["mailbox_id"] in stored:
             result["known"] = True
             continue
-        if full is None:  # list results have no body; fetch it once per email
-            try:
-                full = {**item, **resend_client.get_received(rid)}
-            except resend_client.ResendError:
-                result["failed"] += 1
-                break
+        if full is None:
+            full = {**item, **resend_client.get_received(rid)}
         name, from_addr = parseaddr(full.get("from") or "")
         text, html = full.get("text") or "", full.get("html") or ""
         when = norm_ts(full.get("created_at"))
-        # email_messages.resend_email_id is globally unique, so extra copies get a suffix.
         stored_id = rid if not base_used else f"{rid}#{box['mailbox_id']}"
         with conn() as c:
             row = c.execute(
@@ -162,8 +140,9 @@ def ingest_received(item: dict, boxes: dict | None = None) -> dict:
                     subject, snippet, text_body, html_body, is_read, folder, received_at, resend_email_id)
                    values (%s,'inbound','received',%s,%s,%s,%s,%s,%s,%s,%s,%s,false,'inbox',%s,%s)
                    on conflict do nothing returning email_message_id""",
-                (box["mailbox_id"], full.get("message_id") or None, None, None, from_addr or full.get("from") or "",
-                 name, full.get("subject") or "", make_snippet(text, html), text, html, when, stored_id),
+                (box["mailbox_id"], full.get("message_id") or None, None, None,
+                 from_addr or full.get("from") or "", name, full.get("subject") or "",
+                 make_snippet(text, html), text, html, when, stored_id),
             ).fetchone()
             if row:
                 base_used = True
@@ -179,16 +158,12 @@ def _insert_recipients(c, message_id: int, full: dict) -> None:
             if a:
                 c.execute(
                     "insert into email_recipients (email_message_id, recipient_type, email_address, display_name)"
-                    " values (%s, %s::mail_recipient_type, %s, %s)", (message_id, kind, a, name or None))
+                    " values (%s, %s::mail_recipient_type, %s, %s)",
+                    (message_id, kind, a, name or None),
+                )
 
 
 def sync_inbox(max_pages: int = 5, full_scan: bool = False) -> dict:
-    """Pull received mail from Resend.
-
-    Normal sync stops as soon as a whole page holds nothing new. `full_scan` walks up to 20 pages and is
-    what you use for the first import of old mail. A time budget keeps one call inside the serverless limit;
-    if it is hit, `partial` is true and the next sync continues where this one stopped.
-    """
     ensure_mailboxes()
     boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
     deadline = time.monotonic() + config.SYNC_BUDGET_SECONDS
@@ -213,8 +188,6 @@ def sync_inbox(max_pages: int = 5, full_scan: bool = False) -> dict:
     return {"new": new, "failed": failed, "partial": partial}
 
 
-# ---------- Reading ----------
-
 def _like(q: str) -> str:
     return "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
@@ -225,7 +198,9 @@ def counts(user) -> dict:
         rows = c.execute(
             """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
                where m.folder='inbox' and not m.is_read and m.deleted_at is null and m.mailbox_id = any(%s)
-               group by mb.local_part""", (ids,)).fetchall()
+               group by mb.local_part""",
+            (ids,),
+        ).fetchall()
     return {r["local_part"]: r["n"] for r in rows}
 
 
@@ -238,7 +213,7 @@ def list_messages(user, local: str, folder: str, q: str = "") -> list[dict]:
                               where r.email_message_id = m.email_message_id and r.recipient_type = 'to'), '[]'::jsonb) as to_addrs
              from email_messages m
              where m.mailbox_id = %s and m.folder = %s and m.deleted_at is null"""
-    args: list = [local, box["mailbox_id"], folder]
+    args = [local, box["mailbox_id"], folder]
     if q.strip():
         sql += """ and (m.subject ilike %s or m.from_address ilike %s or m.from_name ilike %s or m.text_body ilike %s
                    or exists (select 1 from email_recipients r where r.email_message_id = m.email_message_id
@@ -257,20 +232,22 @@ def get_message(user, msg_id: int) -> dict | None:
                       m.from_address, m.subject, m.text_body, m.html_body, m.is_read, m.message_id,
                       coalesce(m.received_at, m.sent_at, m.created_at) as created_at
                from email_messages m join mailboxes mb using (mailbox_id)
-               where m.email_message_id = %s and m.deleted_at is null""", (msg_id,)).fetchone()
+               where m.email_message_id = %s and m.deleted_at is null""",
+            (msg_id,),
+        ).fetchone()
         if not row or row["mailbox_id"] not in allowed:
             return None
         for kind in ("to", "cc", "bcc"):
             row[kind + "_addrs"] = [r["email_address"] for r in c.execute(
                 "select email_address from email_recipients where email_message_id=%s and recipient_type=%s::mail_recipient_type"
-                " order by email_recipient_id", (msg_id, kind)).fetchall()]
+                " order by email_recipient_id",
+                (msg_id, kind),
+            ).fetchall()]
         if row["folder"] == "inbox" and not row["is_read"]:
             c.execute("update email_messages set is_read=true, updated_at=now() where email_message_id=%s", (msg_id,))
     row.pop("mailbox_id")
     return row
 
-
-# ---------- Sending ----------
 
 def split_addrs(value: str) -> list[str]:
     out = []
@@ -303,19 +280,28 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
 
     label = box["label"]
     subject = subject.strip() or "(no subject)"
-    payload = {"from": f"{label} <{box['address']}>", "to": to_l, "subject": subject,
-               "text": body, "html": text_to_html(body)}
+    payload = {
+        "from": f"{label} <{box['address']}>",
+        "to": to_l,
+        "subject": subject,
+        "text": body,
+        "html": text_to_html(body),
+    }
     if cc_l:
         payload["cc"] = cc_l
     if bcc_l:
         payload["bcc"] = bcc_l
+
     parent = None
     if reply_to_id:
         parent = get_message(user, int(reply_to_id))
         if parent and parent.get("message_id"):
-            payload["headers"] = {"In-Reply-To": parent["message_id"], "References": parent["message_id"]}
+            payload["headers"] = {
+                "In-Reply-To": parent["message_id"],
+                "References": parent["message_id"],
+            }
 
-    sent = resend_client.send(payload)  # raises ResendError on failure; nothing is stored then
+    sent = resend_client.send(payload)
 
     with conn() as c:
         row = c.execute(
@@ -324,12 +310,25 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
                 text_body, html_body, is_read, folder, sent_at, resend_email_id)
                values (%s,'outbound','sent',%s,%s,%s,%s,%s,%s,%s,%s,true,'sent',now(),%s)
                returning email_message_id""",
-            (box["mailbox_id"], (parent or {}).get("message_id"), (parent or {}).get("message_id"), box["address"],
-             label, subject, make_snippet(body, ""), body, payload["html"], sent.get("id")),
+            (
+                box["mailbox_id"],
+                (parent or {}).get("message_id"),
+                (parent or {}).get("message_id"),
+                box["address"],
+                label,
+                subject,
+                make_snippet(body, ""),
+                body,
+                payload["html"],
+                sent.get("id"),
+            ),
         ).fetchone()
         mid = row["email_message_id"]
         for kind, addrs in (("to", to_l), ("cc", cc_l), ("bcc", bcc_l)):
             for a in addrs:
-                c.execute("insert into email_recipients (email_message_id, recipient_type, email_address)"
-                          " values (%s, %s::mail_recipient_type, %s)", (mid, kind, a.lower()))
+                c.execute(
+                    "insert into email_recipients (email_message_id, recipient_type, email_address)"
+                    " values (%s, %s::mail_recipient_type, %s)",
+                    (mid, kind, a.lower()),
+                )
     return mid

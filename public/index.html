@@ -1,9 +1,9 @@
-<!doctype html><a class="skip-link" href="#main-content">Skip to main content</a>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="theme-color" content="#092b63">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RT Crackers Mail</title>
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -19,7 +19,7 @@
       </nav>
       <div class="side-foot">
         <button class="ghost" id="syncBtn">Sync inbox</button>
-        <button class="ghost small" id="fullSyncBtn" title="Walk back through older mail in Resend">Import older mail</button>
+        <button class="ghost small" id="fullSyncBtn">Import older mail</button>
         <div class="status" id="status"></div>
         <div class="who"><span id="who"></span><button class="link" id="signOutBtn">Sign out</button></div>
       </div>
@@ -35,6 +35,7 @@
 
     <section class="reader" id="readerPane" data-rtc-component="reader"></section>
   </div>
+
   <div class="login" id="login" hidden data-rtc-component="login_card">
     <div class="login-card">
       <div class="brand">RT Crackers<span>Mail</span></div>
@@ -46,6 +47,7 @@
       <button class="btn" id="lBtn">Sign in</button>
     </div>
   </div>
+
   <div class="toast" id="toast" role="status"></div>
   <script src="/app.js"></script>
 </body>
