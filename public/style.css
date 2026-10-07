@@ -16,6 +16,11 @@ button { cursor: pointer; border: 0; background: none; }
 .app.composing .list { display: none; }
 .side { background: var(--ink); color: var(--ink-text); display: flex; flex-direction: column; padding: 18px 12px; gap: 14px; overflow-y: auto; }
 .brand { font-size: 19px; font-weight: 700; padding: 0 8px; letter-spacing: .2px; }
+.brand { display:flex; align-items:center; gap:10px; }
+.brand-logo { width:34px; height:34px; object-fit:contain; border-radius:8px; background:#fff; padding:3px; flex:0 0 auto; }
+.brand-logo[hidden] { display:none; }
+.brand .company-brand-name { color:var(--ink-text); margin-left:0; }
+.brand .brand-product { color:var(--red); margin-left:0; }
 .brand span { color: var(--red); margin-left: 6px; }
 .boxes { display: flex; flex-direction: column; gap: 4px; }
 .box { text-align: left; padding: 9px 10px 9px 12px; border-radius: 8px; border-left: 4px solid var(--c); color: var(--ink-muted); display: grid; grid-template-columns: 1fr auto; align-items: center; }

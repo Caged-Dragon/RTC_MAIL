@@ -55,6 +55,15 @@ def get_theme():
     return {**(row or {}), "components": components}
 
 
+@router.get("/company")
+def get_company():
+    with conn() as c:
+        row = c.execute(
+            "select company_name, logo_url from public.company_profile where is_active=true order by updated_at desc limit 1"
+        ).fetchone()
+    return row or {}
+
+
 @router.get("/config")
 def get_config(user: auth.User = Depends(auth.current_user)):
     service.ensure_mailboxes()

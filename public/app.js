@@ -9,6 +9,23 @@ const session = {
   clear() { try { localStorage.removeItem(TOK); } catch {} },
 };
 
+async function applyCompanyBrand() {
+  try {
+    const res = await fetch("/api/company");
+    if (!res.ok) return;
+    const company = await res.json();
+    document.querySelectorAll(".brand").forEach((brand) => {
+      const name = brand.querySelector(".company-brand-name");
+      const logo = brand.querySelector(".brand-logo");
+      if (name && company.company_name) name.textContent = company.company_name;
+      if (logo) {
+        if (company.logo_url) { logo.src = company.logo_url; logo.alt = company.company_name ? company.company_name + " logo" : "Company logo"; logo.hidden = false; }
+        else logo.hidden = true;
+      }
+    });
+  } catch {}
+}
+
 async function applyDbTheme() {
   try {
     const res = await fetch("/api/theme");
@@ -281,6 +298,7 @@ async function start() {
 }
 
 (function init() {
+  applyCompanyBrand();
   applyDbTheme();
   $("#composeBtn").addEventListener("click", () => S.cfg && setView("compose"));
   document.querySelectorAll(".nav button").forEach((b) => b.addEventListener("click", () => S.cfg && setView(b.dataset.view)));
