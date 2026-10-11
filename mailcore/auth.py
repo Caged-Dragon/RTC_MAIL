@@ -55,16 +55,16 @@ def fetch_user(token: str) -> dict | None:
 
 
 def load_permissions(uid: str, email: str) -> tuple[bool, set[int]]:
+    """Admin = an ACTIVE public.admin_access row linked to this Supabase auth user (any admin id, not one address).
+    Matching on the auth user id (never on the e-mail text alone) means nobody can claim an admin address by signing up."""
     with conn() as c:
         admin_row = c.execute(
-            "select 1 from public.admin_access where lower(email)=lower(%s) and is_active=true", (email,)
+            "select 1 from public.admin_access where auth_user_id=%s and is_active=true", (uid,)
         ).fetchone()
         rows = c.execute(
             "select mailbox_id from public.mailbox_access where auth_user_id=%s", (uid,)
         ).fetchall()
-    # Admin rights are only ever granted to the configured portal admin address.
-    is_admin = bool(admin_row) and email.strip().lower() == config.ADMIN_EMAIL
-    return is_admin, {r["mailbox_id"] for r in rows}
+    return bool(admin_row), {r["mailbox_id"] for r in rows}
 
 
 def current_user(request: Request) -> User:
@@ -104,17 +104,25 @@ def current_user(request: Request) -> User:
     return user
 
 
+LOGIN_FAILED = "Wrong email or password"
+
+
 def password_login(email: str, password: str) -> dict:
+    """Sign in with the same Supabase credentials as the admin site. The account must be an active admin
+    (public.admin_access) or hold explicit mailbox access; every other account gets the same generic failure."""
     _require_supabase()
-    email = email.strip()
-    if email.lower() != config.ADMIN_EMAIL:
-        raise HTTPException(403, f"Mail portal login is restricted to {config.ADMIN_EMAIL}")
-    return _token_call("password", {"email": email, "password": password})
+    tokens = _token_call("password", {"email": email.strip(), "password": password})
+    is_admin, ids = load_permissions(tokens.pop("uid"), tokens.get("email", ""))
+    if not is_admin and not ids:
+        raise HTTPException(401, LOGIN_FAILED)
+    return tokens
 
 
 def refresh(refresh_token: str) -> dict:
     _require_supabase()
-    return _token_call("refresh_token", {"refresh_token": refresh_token})
+    out = _token_call("refresh_token", {"refresh_token": refresh_token})
+    out.pop("uid", None)
+    return out
 
 
 def _token_call(grant: str, body: dict) -> dict:
@@ -140,4 +148,5 @@ def _token_call(grant: str, body: dict) -> dict:
         "refresh_token": d["refresh_token"],
         "expires_in": d.get("expires_in", 3600),
         "email": (d.get("user") or {}).get("email", ""),
+        "uid": (d.get("user") or {}).get("id", ""),
     }

@@ -6,6 +6,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from svix.webhooks import Webhook, WebhookVerificationError
 
 from . import auth, config, resend_client, service
 from .db import conn
@@ -118,6 +119,7 @@ def get_config(response: Response, user: auth.User = Depends(auth.current_user))
     return {
         "domain": config.MAIL_DOMAIN,
         "user": user.email,
+        "is_admin": user.is_admin,
         "mailboxes": [
             {"id": b["local_part"], "label": b["label"], "address": b["address"], "can_send": b["is_sending_enabled"]}
             for b in boxes
@@ -229,18 +231,47 @@ def sync(response: Response, full: bool = False, user: auth.User = Depends(auth.
         raise _resend_http_error(exc)
 
 
+def admin_only(user: auth.User = Depends(auth.current_user)) -> auth.User:
+    if not user.is_admin:
+        raise HTTPException(403, "Administrators only")
+    return user
+
+
+@router.get("/compliance")
+def compliance_report(response: Response, refresh: bool = False, user: auth.User = Depends(admin_only)):
+    """Is company mail held only here? DNS look-up + application guarantees."""
+    response.headers["Cache-Control"] = "no-store"
+    return service.compliance_report(force=refresh)
+
+
+@router.get("/archive")
+def archive_list(
+    response: Response,
+    q: str = Query("", max_length=200),
+    mailbox: str = Query("", max_length=64),
+    limit: int = Query(50, ge=1, le=service.MAX_PAGE),
+    offset: int = Query(0, ge=0, le=100_000),
+    user: auth.User = Depends(admin_only),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return service.archive_search(q, mailbox, limit, offset)
+
+
+@router.get("/archive/{archive_id}")
+def archive_item(archive_id: int, response: Response, user: auth.User = Depends(admin_only)):
+    response.headers["Cache-Control"] = "no-store"
+    item = service.archive_get(archive_id)
+    if not item:
+        raise HTTPException(404, "Archived message not found")
+    return item
+
+
 @router.post("/webhooks/resend")
 async def resend_webhook(request: Request):
     if not config.RESEND_WEBHOOK_SECRET:
         raise HTTPException(503, "Webhook disabled: set RESEND_WEBHOOK_SECRET")
     raw = await request.body()
     headers = {k: v for k, v in request.headers.items() if k.lower() in _WEBHOOK_HEADERS}
-    try:
-        # Imported here, not at module level, so a problem with this library can never stop the whole app starting.
-        from svix.webhooks import Webhook, WebhookVerificationError
-    except ImportError:
-        log.exception("The svix package could not be imported")
-        raise HTTPException(503, "Webhook verification is unavailable")
     try:
         Webhook(config.RESEND_WEBHOOK_SECRET).verify(raw, headers)
     except WebhookVerificationError:

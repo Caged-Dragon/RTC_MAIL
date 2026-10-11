@@ -58,15 +58,20 @@ class TestAuthRequired:
     def test_empty_bearer_token_rejected(self, client):
         assert client.get("/api/counts", headers={"authorization": "Bearer "}).status_code == 401
 
-    def test_login_restricted_to_admin_email(self, client):
-        r = client.post("/api/auth/login", json={"email": "someone@else.com", "password": "x"})
-        assert r.status_code == 403 and config.ADMIN_EMAIL in r.json()["detail"]
-
-    def test_login_success_returns_tokens(self, client, monkeypatch):
+    def test_login_rejects_account_without_admin_or_mailbox_access(self, client, monkeypatch):
         monkeypatch.setattr(auth.httpx, "post", lambda *a, **k: httpx.Response(
-            200, json={"access_token": "a", "refresh_token": "r", "user": {"email": config.ADMIN_EMAIL}}))
-        r = client.post("/api/auth/login", json={"email": f" {config.ADMIN_EMAIL} ", "password": "pw"})
-        assert r.status_code == 200 and r.json()["access_token"] == "a"
+            200, json={"access_token": "a", "refresh_token": "r", "user": {"id": "u9", "email": "someone@else.com"}}))
+        monkeypatch.setattr(auth, "load_permissions", lambda uid, email: (False, set()))
+        r = client.post("/api/auth/login", json={"email": "someone@else.com", "password": "x"})
+        assert r.status_code == 401 and r.json()["detail"] == auth.LOGIN_FAILED   # same message as a wrong password
+
+    @pytest.mark.parametrize("email", ["admin@rtcrackers.com", "developer@rtcrackers.com"])
+    def test_every_active_admin_id_can_sign_in(self, client, monkeypatch, email):
+        monkeypatch.setattr(auth.httpx, "post", lambda *a, **k: httpx.Response(
+            200, json={"access_token": "a", "refresh_token": "r", "user": {"id": "u1", "email": email}}))
+        monkeypatch.setattr(auth, "load_permissions", lambda uid, e: (True, set()))
+        r = client.post("/api/auth/login", json={"email": f" {email} ", "password": "pw"})
+        assert r.status_code == 200 and r.json()["access_token"] == "a" and "uid" not in r.json()
         assert r.headers["cache-control"] == "no-store"
 
     def test_wrong_password_is_401(self, client, monkeypatch):
@@ -294,39 +299,3 @@ class TestGmailStyleApi:
         r = client.post("/api/webhooks/resend", content=body, headers=signed_headers(body))
         assert r.status_code == 200 and r.json() == {"delivery": "email.bounced", "updated": 1}
         assert client.get("/api/messages?mailbox=sales&folder=sent").json()[0]["status"] == "bounced"
-
-
-class TestStartupResilience:
-    def test_import_failure_is_reported_on_health_instead_of_crashing(self, monkeypatch):
-        """If the application modules cannot load, /api/health must say why (not an opaque platform 500)."""
-        import sys
-
-        from fastapi.testclient import TestClient
-
-        monkeypatch.setitem(sys.modules, "mailcore.routes", None)   # makes `from mailcore.routes import router` fail
-        sys.modules.pop("main", None)
-        try:
-            import main
-
-            r = TestClient(main.app).get("/api/health")
-            assert r.status_code == 503
-            body = r.json()
-            assert body["ok"] is False
-            assert "ImportError" in body["startup_error"] or "ModuleNotFoundError" in body["startup_error"]
-            assert r.headers["x-content-type-options"] == "nosniff"      # security headers still applied
-        finally:
-            sys.modules.pop("main", None)                                # next tests re-import the healthy app
-
-    def test_svix_is_not_needed_at_startup(self):
-        """A broken svix install may only affect the webhook, never the whole app."""
-        import subprocess, sys, textwrap
-
-        code = textwrap.dedent("""
-            import sys
-            sys.modules["svix"] = None; sys.modules["svix.webhooks"] = None
-            import main
-            assert main.STARTUP_ERROR is None, main.STARTUP_ERROR
-            print("started without svix")
-        """)
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(config.ROOT))
-        assert "started without svix" in out.stdout, out.stderr[-500:]

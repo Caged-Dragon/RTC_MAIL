@@ -439,3 +439,12 @@ def test_delivery_events_update_sent_status(inbox3, fake_resend):
     assert service.apply_delivery_event("email.delivered", "unknown-id") == 0
     assert service.apply_delivery_event("email.opened", "out-1") == 0
     assert service.apply_delivery_event("email.delivered", None) == 0
+
+
+def test_mail_for_unknown_company_address_lands_in_catch_all(db, fake_resend):
+    """Resend delivers every address at the domain; mail for an address with no mailbox must not be lost."""
+    service.ensure_mailboxes()
+    r = service.ingest_received(received(to="nobody@rtcrackers.com"))
+    assert r["ours"] is True and r["new"] == 1 and r["catch_all"] is True
+    [row] = service.list_messages(ADMIN, "admin", "inbox")
+    assert row["from_address"] == "jane@example.com"

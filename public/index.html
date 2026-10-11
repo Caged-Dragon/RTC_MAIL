@@ -27,6 +27,7 @@
       <div class="side-foot">
         <button type="button" class="ghost" id="syncBtn">Sync inbox</button>
         <button type="button" class="ghost small" id="fullSyncBtn">Import older mail</button>
+        <button type="button" class="ghost small" id="lockBtn" hidden>Mail lock &amp; archive</button>
         <button type="button" class="link small-link" id="helpBtn">Keyboard shortcuts (?)</button>
         <div class="status" id="status" role="status"></div>
         <div class="who"><span id="who"></span><button type="button" class="link" id="signOutBtn">Sign out</button></div>
@@ -48,6 +49,7 @@
   </div>
 
   <div class="overlay" id="help" hidden></div>
+  <div class="overlay" id="lockPanel" hidden></div>
 
   <div class="login" id="login" hidden data-rtc-component="login_card">
     <div class="login-card">

@@ -107,6 +107,24 @@ def _addr(raw: str) -> tuple[str, str]:
     return name, a.strip().lower()
 
 
+def _is_company_mail(item: dict) -> bool:
+    """True if any recipient is on the company domain (and the mail is therefore ours to keep)."""
+    suffix = "@" + config.MAIL_DOMAIN
+    return any(
+        _addr(raw)[1].endswith(suffix)
+        for key in ("to", "cc", "bcc")
+        for raw in as_list(item.get(key))
+    )
+
+
+def _catch_all_box(boxes: dict) -> dict | None:
+    """The mailbox that receives mail for unknown company addresses: admin@, else the first receiving mailbox."""
+    for b in boxes.values():
+        if b["local_part"] == "admin":
+            return b
+    return next(iter(boxes.values()), None)
+
+
 def ingest_received(item: dict, boxes: dict | None = None) -> dict:
     rid = item.get("id")
     result = {"new": 0, "known": False, "failed": 0, "ours": False}
@@ -121,6 +139,14 @@ def ingest_received(item: dict, boxes: dict | None = None) -> dict:
             box = boxes.get(_addr(raw)[1])
             if box and box not in targets:
                 targets.append(box)
+
+    if not targets and _is_company_mail(item):
+        # Resend delivers EVERY address at the domain. Mail for an address that has no mailbox (typo, retired
+        # alias, random@...) must still be kept here, never left only with the provider: file it in the catch-all.
+        catch_all = _catch_all_box(boxes)
+        if catch_all:
+            targets = [catch_all]
+            result["catch_all"] = True
 
     result["ours"] = bool(targets)
     if not targets:
@@ -609,3 +635,80 @@ def apply_delivery_event(event_type: str, resend_email_id: str | None, event_id:
             (status, event_id, resend_email_id, status),
         ).fetchall()
     return len(rows)
+
+
+# --- Mail lock: append-only archive and compliance report -------------------------------------------
+_COMPLIANCE_TTL = 300
+_compliance_cache: dict = {"at": 0.0, "data": None}
+
+
+def archive_search(q: str = "", mailbox: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    """Admin-only. Lists the append-only archive (it still holds mail deleted from the mailboxes)."""
+    sql = """select a.archive_id, a.email_message_id, a.mailbox_address, a.direction, a.from_address, a.from_name, a.subject,
+                    coalesce(a.received_at, a.sent_at, a.archived_at) as ts,
+                    left(coalesce(a.text_body, ''), 160) as snippet,
+                    exists (select 1 from email_messages m where m.email_message_id = a.email_message_id and m.deleted_at is null) as in_mailbox
+             from mail_archive a where true"""
+    args: list = []
+    if mailbox:
+        sql += " and a.mailbox_address = %s"
+        args.append(f"{mailbox.lower()}@{config.MAIL_DOMAIN}")
+    q = (q or "").strip()
+    if q:
+        sql += """ and (a.subject ilike %s or a.from_address ilike %s or a.from_name ilike %s or a.text_body ilike %s
+                   or exists (select 1 from mail_archive_recipients r where r.email_message_id = a.email_message_id and r.email_address ilike %s))"""
+        args += [_like(q)] * 5
+    sql += " order by ts desc, a.archive_id desc limit %s offset %s"
+    args += [min(max(int(limit), 1), MAX_PAGE), max(int(offset), 0)]
+    with conn() as c:
+        return c.execute(sql, args).fetchall()
+
+
+def archive_get(archive_id: int) -> dict | None:
+    with conn() as c:
+        row = c.execute("select * from mail_archive where archive_id = %s", (archive_id,)).fetchone()
+        if not row:
+            return None
+        rec = c.execute(
+            "select recipient_type, email_address, display_name from mail_archive_recipients where email_message_id = %s order by archive_recipient_id",
+            (row["email_message_id"],),
+        ).fetchall()
+    row["to_addrs"] = [r for r in rec if r["recipient_type"] == "to"]
+    row["cc_addrs"] = [r for r in rec if r["recipient_type"] == "cc"]
+    row["bcc_addrs"] = [r for r in rec if r["recipient_type"] == "bcc"]
+    return row
+
+
+def compliance_report(force: bool = False) -> dict:
+    """DNS 'mail lock' check plus what this application itself guarantees. Cached for five minutes."""
+    from . import compliance
+
+    now = time.monotonic()
+    if not force and _compliance_cache["data"] and now - _compliance_cache["at"] < _COMPLIANCE_TTL:
+        return _compliance_cache["data"]
+    try:
+        dns = compliance.fetch_dns(config.MAIL_DOMAIN)
+        report = compliance.evaluate(config.MAIL_DOMAIN, dns["mx"], dns["spf"], dns["dmarc"], dns["dkim"], config.ALLOWED_MX)
+    except Exception as exc:  # network/DNS problem: say so instead of pretending everything is fine
+        log.warning("DNS check failed: %s", exc)
+        report = {"domain": config.MAIL_DOMAIN, "status": "warning", "mx": [], "checked_at": int(time.time()),
+                  "checks": [compliance._check("dns", "DNS look-up", "warning", "Could not read DNS right now. Try again in a minute.")]}
+
+    with conn() as c:
+        off = c.execute("select count(*) n from mailboxes where email_address not like %s", ("%@" + config.MAIL_DOMAIN,)).fetchone()["n"]
+        arch = c.execute("select count(*) n, max(archived_at) last from mail_archive").fetchone()
+        live = c.execute("select count(*) n from email_messages where status <> 'draft'").fetchone()["n"]
+    app = report["checks"]
+    app.append(compliance._check("mailboxes", "Mailboxes only on your domain", "ok" if off == 0 else "fail",
+                                 "Every mailbox is an @" + config.MAIL_DOMAIN + " address." if off == 0 else f"{off} mailbox(es) use another domain."))
+    app.append(compliance._check("catchall", "Unknown addresses", "ok",
+                                 "Mail to any other @" + config.MAIL_DOMAIN + " address is kept in the admin mailbox, not lost."))
+    app.append(compliance._check("archive", "Permanent archive", "ok" if arch["n"] >= live else "warning",
+                                 f"{arch['n']} messages archived (append-only; survives deleting from a mailbox)."))
+    app.append(compliance._check("resend", "Receiving connected", "ok" if config.RESEND_API_KEY and config.RESEND_WEBHOOK_SECRET else "warning",
+                                 "Resend key and webhook secret are set." if config.RESEND_API_KEY and config.RESEND_WEBHOOK_SECRET
+                                 else "RESEND_API_KEY and/or RESEND_WEBHOOK_SECRET is missing on the server."))
+    order = {"fail": 2, "warning": 1, "ok": 0}
+    report["status"] = max((c["status"] for c in app), key=lambda s: order[s])
+    _compliance_cache.update(at=now, data=report)
+    return report

@@ -29,8 +29,13 @@ SUPABASE_URL = _env("SUPABASE_URL").rstrip("/")
 SUPABASE_ANON_KEY = _env("SUPABASE_ANON_KEY")
 SYNC_BUDGET_SECONDS = _env_float("SYNC_BUDGET_SECONDS", 45.0)
 
-# The only account allowed to sign in to the portal (and to be treated as admin).
+# Kept for backwards compatibility only. Sign-in is no longer limited to this address:
+# every ACTIVE row in public.admin_access (matched by Supabase auth user id) may enter.
 ADMIN_EMAIL = _env("MAIL_ADMIN_EMAIL", f"admin@{MAIL_DOMAIN}").lower()
+
+# MX hosts that are allowed to hold company mail (regular expressions, comma separated).
+# Default = Resend's inbound servers (AWS SES inbound). Anything else is reported as a leak.
+ALLOWED_MX = [x.strip() for x in _env("MAIL_ALLOWED_MX", r"^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$").split(",") if x.strip()]
 
 # Local-only escape hatch; can never be enabled on Vercel.
 DEV_NO_AUTH = _env("MAIL_DEV_NO_AUTH") == "1" and not os.getenv("VERCEL")

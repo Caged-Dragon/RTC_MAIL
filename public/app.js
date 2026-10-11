@@ -834,12 +834,86 @@ async function signOut() {
   showLogin();
 }
 
+
+// ---------------------------------------------------------------- mail lock & archive (administrators)
+const LK_ICON = { ok: "✓", warning: "!", fail: "✕" };
+const LK_TEXT = {
+  ok: "Locked: company mail is held only by this system.",
+  warning: "Almost locked: review the warnings below.",
+  fail: "Not locked: another mail server can still receive company mail.",
+};
+function closeLock() { $("#lockPanel").hidden = true; }
+function openLock(tab = "lock") {
+  const box = $("#lockPanel");
+  const body = h("div", {});
+  const tabs = h("div", { class: "lk-tabs" },
+    h("button", { type: "button", class: tab === "lock" ? "on" : "", onclick: () => openLock("lock") }, "Mail lock"),
+    h("button", { type: "button", class: tab === "archive" ? "on" : "", onclick: () => openLock("archive") }, "Archive"));
+  box.replaceChildren(h("div", { class: "card", role: "dialog", "aria-modal": "true", "aria-label": "Mail lock and archive" },
+    h("div", { class: "card-head" }, h("h2", {}, "Mail lock & archive"), iconBtn("close", "Close", closeLock)), tabs, body));
+  box.hidden = false;
+  if (tab === "lock") lockTab(body); else archiveTab(body);
+}
+async function lockTab(body, refresh = false) {
+  body.replaceChildren(h("p", {}, "Checking your domain's DNS…"));
+  try {
+    const r = await api("/compliance" + (refresh ? "?refresh=true" : ""));
+    body.replaceChildren(
+      h("div", { class: "lk-banner " + r.status }, LK_TEXT[r.status] || r.status),
+      r.checks.map((c) => h("div", { class: "lk-check " + c.status },
+        h("span", { class: "dot" }, LK_ICON[c.status] || "?"),
+        h("div", {}, h("b", {}, c.title), h("div", {}, c.detail)),
+        c.fix ? h("div", { class: "fix" }, "How to fix: " + c.fix) : null)),
+      h("p", {}, h("button", { type: "button", class: "ghost", onclick: () => lockTab(body, true) }, "Check again")));
+  } catch (e) { body.replaceChildren(h("p", {}, e.message)); }
+}
+function archiveTab(body) {
+  const list = h("div", {});
+  const detail = h("div", { class: "lk-msg" });
+  const q = h("input", { type: "search", placeholder: "Search the archive (sender, subject, text, recipient)", "aria-label": "Search archive" });
+  const sel = h("select", { "aria-label": "Mailbox" }, h("option", { value: "" }, "All mailboxes"),
+    S.cfg.mailboxes.map((m) => h("option", { value: m.id }, m.id)));
+  let t;
+  const load = async () => {
+    try {
+      const rows = await api("/archive?limit=100&q=" + enc(q.value) + "&mailbox=" + enc(sel.value));
+      list.replaceChildren(rows.length ? rows.map((m) => h("button", { type: "button", class: "lk-row", onclick: () => show(m.archive_id) },
+        h("b", {}, m.subject || "(no subject)"), m.in_mailbox ? null : h("span", { class: "lk-tag" }, "removed from mailbox"),
+        h("small", {}, `${m.direction === "inbound" ? "From" : "To/From"} ${m.from_name || m.from_address} · ${m.mailbox_address} · ${fmtShort(m.ts)}`),
+        h("small", {}, m.snippet))) : h("p", {}, "Nothing archived matches."));
+    } catch (e) { list.replaceChildren(h("p", {}, e.message)); }
+  };
+  const show = async (id) => {
+    try {
+      const m = await api("/archive/" + id);
+      const names = (a) => a.map((x) => x.email_address).join(", ") || "—";
+      let text = m.text_body || "";
+      if (!text && m.html_body) text = new DOMParser().parseFromString(m.html_body, "text/html").body.textContent.trim();
+      detail.replaceChildren(h("hr", {}), h("dl", {},
+        h("dt", {}, "From"), h("dd", {}, `${m.from_name ? m.from_name + " " : ""}<${m.from_address}>`),
+        h("dt", {}, "To"), h("dd", {}, names(m.to_addrs)), h("dt", {}, "Cc"), h("dd", {}, names(m.cc_addrs)),
+        m.bcc_addrs.length ? [h("dt", {}, "Bcc"), h("dd", {}, names(m.bcc_addrs))] : null,
+        h("dt", {}, "Subject"), h("dd", {}, m.subject || "(no subject)"),
+        h("dt", {}, "Date"), h("dd", {}, fmtShort(m.received_at || m.sent_at || m.archived_at)),
+        h("dt", {}, "Seal"), h("dd", {}, "SHA-256 " + m.content_sha256.slice(0, 16) + "…")),
+        h("pre", {}, text || "(no text content)"));
+      detail.scrollIntoView({ block: "nearest" });
+    } catch (e) { detail.replaceChildren(h("p", {}, e.message)); }
+  };
+  q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
+  sel.addEventListener("change", load);
+  body.replaceChildren(h("p", {}, "Every message ever received or sent is kept here permanently, even after it is deleted from a mailbox."),
+    h("div", { class: "lk-bar" }, q, sel), list, detail);
+  load();
+}
+
 async function start() {
   try { S.cfg = await api("/config"); }
   catch (e) { session.clear(); showLogin(); $("#lErr").textContent = e.message; return; }
 
   if (!S.cfg.mailboxes.some((m) => m.id === S.box)) S.box = S.cfg.mailboxes[0]?.id || "admin";
   $("#who").textContent = S.cfg.user;
+  $("#lockBtn").hidden = !S.cfg.is_admin;
   const st = $("#status");
   st.textContent = S.cfg.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
   st.className = "status" + (S.cfg.resend_configured ? "" : " warn");
@@ -895,6 +969,7 @@ function onKey(e) {
   }
   if (!S.cfg || !$("#login").hidden) return;
   if (!$("#help").hidden) { if (e.key === "Escape" || e.key === "?") toggleHelp(false); return; }
+  if (!$("#lockPanel").hidden) { if (e.key === "Escape") closeLock(); return; }
   const k = e.key;
   if (gPending) {
     gPending = false;
@@ -938,6 +1013,8 @@ function onKey(e) {
   $("#signOutBtn").addEventListener("click", signOut);
   $("#helpBtn").addEventListener("click", () => toggleHelp(true));
   $("#help").addEventListener("click", (e) => { if (e.target.id === "help") toggleHelp(false); });
+  $("#lockPanel").addEventListener("click", (e) => { if (e.target.id === "lockPanel") closeLock(); });
+  $("#lockBtn").addEventListener("click", () => openLock("lock"));
   $("#lBtn").addEventListener("click", doLogin);
   $("#lPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("#lEmail").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#lPass").focus(); });

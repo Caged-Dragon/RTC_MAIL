@@ -36,6 +36,11 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 - Delivery status from Resend webhooks: Delivered, Bounced, Failed, Spam report (a bounce can never be hidden by a late event).
 - Incoming mail via webhook, 60-second auto-sync and *Import older mail*; one sync at a time; rate-limited Resend client with retry.
 
+**Mail lock (administrators)**
+- Every active ID in `admin_access` can sign in (same IDs as the admin site).
+- *Mail lock & archive* panel: live DNS check that no other mail server can hold company mail, plus a permanent, searchable, append-only archive.
+- Mail for an unknown `@rtcrackers.com` address is filed in the admin mailbox instead of being dropped.
+
 **Privacy and security**
 - Remote images blocked by default (no tracking pixels); *Load images* per message.
 - HTML mail rendered in a sandboxed iframe with its own Content-Security-Policy.
@@ -84,18 +89,6 @@ uvicorn main:app --reload
 For local work without Supabase Auth set `MAIL_DEV_NO_AUTH=1` in `.env`.
 
 > **Keep secrets out of Git:** put real keys in `.env` (git-ignored), never in `.env.example`, which is committed and must stay empty. A unit test fails if a key ends up there.
-
-## Troubleshooting
-
-Open `https://<your-domain>/api/health`:
-
-- `{"ok":true}` - the app is running. If something else fails, the browser's Network tab shows a readable `detail` message (for example *SUPABASE_URL and SUPABASE_ANON_KEY are not configured* or *Database temporarily unavailable*).
-- `{"ok":false,"startup_error":"..."}` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
-- A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
-
-Dependencies are declared in **both** `requirements.txt` and `pyproject.toml` (a unit test keeps them identical), because hosts such as Vercel may install from either. If a deploy fails at startup with `No module named 'fastapi'`, the install step did not run - check the build log.
-
-After adding or changing Environment Variables in Vercel, **redeploy** - changes only apply to new deployments. On Vercel use Supabase's **pooler** connection string for `DATABASE_URL`, not the direct `db.<ref>.supabase.co` host.
 
 ## Tests
 

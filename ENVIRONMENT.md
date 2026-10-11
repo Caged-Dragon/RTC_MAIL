@@ -16,4 +16,8 @@ ADMIN_SITE_URL=https://YOUR-ADMIN-DOMAIN
 
 Keep the Resend key, webhook secret, and database connection string server-side only.
 
-`MAIL_ADMIN_EMAIL` is optional (defaults to `admin@<MAIL_DOMAIN>`). `MAIL_DEV_NO_AUTH=1` disables login for local development only and is ignored on Vercel.
+Sign-in: **every active admin ID in the `admin_access` table can sign in** (the same Supabase IDs as admin.rtcrackers.com). `MAIL_ADMIN_EMAIL` is no longer a gate and can be removed.
+
+`MAIL_ALLOWED_MX` (optional) = comma-separated regular expressions for MX hosts allowed to hold company mail; default is Resend's inbound server (`^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$`).
+
+`MAIL_ADMIN_EMAIL` is optional legacy. `MAIL_DEV_NO_AUTH=1` disables login for local development only and is ignored on Vercel.
