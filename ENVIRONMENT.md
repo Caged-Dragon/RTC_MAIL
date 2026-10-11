@@ -8,9 +8,12 @@ DATABASE_URL=YOUR_SUPABASE_POOLER_CONNECTION_STRING
 SUPABASE_URL=https://ypmiinmkyvzdpakbkers.supabase.co
 SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 SYNC_BUDGET_SECONDS=45
+MAIL_ADMIN_EMAIL=admin@rtcrackers.com
 ORDER_FROM_EMAIL=RT Crackers <orders@rtcrackers.com>
 ORDER_SITE_URL=https://YOUR-CART-DOMAIN
 ADMIN_SITE_URL=https://YOUR-ADMIN-DOMAIN
 ```
 
 Keep the Resend key, webhook secret, and database connection string server-side only.
+
+`MAIL_ADMIN_EMAIL` is optional (defaults to `admin@<MAIL_DOMAIN>`). `MAIL_DEV_NO_AUTH=1` disables login for local development only and is ignored on Vercel.

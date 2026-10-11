@@ -1,14 +1,26 @@
 """Mail logic on Supabase Postgres: discover mailboxes, pull received mail, send mail through Resend."""
 import html as htmllib
+import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
-from email.utils import parseaddr
+from email.utils import formataddr, parseaddr
 
 from . import config, resend_client
 from .db import conn
 
+log = logging.getLogger(__name__)
+
 EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
+MAX_RECIPIENTS = 50          # per field (to / cc / bcc)
+MAX_SUBJECT_LEN = 500
+_CONFIG_ERROR_STATUSES = {400, 401, 403}   # Resend problems that retrying per-message cannot fix
+_sync_lock = threading.Lock()
+
+
+class SentNotSaved(Exception):
+    """The message was delivered to Resend but could not be stored in the Sent folder."""
 
 
 def norm_ts(value) -> datetime:
@@ -128,7 +140,14 @@ def ingest_received(item: dict, boxes: dict | None = None) -> dict:
             result["known"] = True
             continue
         if full is None:
-            full = {**item, **resend_client.get_received(rid)}
+            try:
+                full = {**item, **resend_client.get_received(rid)}
+            except resend_client.ResendError as exc:
+                if exc.status in _CONFIG_ERROR_STATUSES:
+                    raise
+                log.warning("Could not download received email %s: %s", rid, exc)
+                result["failed"] += 1
+                return result
         name, from_addr = parseaddr(full.get("from") or "")
         text, html = full.get("text") or "", full.get("html") or ""
         when = norm_ts(full.get("created_at"))
@@ -164,28 +183,34 @@ def _insert_recipients(c, message_id: int, full: dict) -> None:
 
 
 def sync_inbox(max_pages: int = 5, full_scan: bool = False) -> dict:
-    ensure_mailboxes()
-    boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
-    deadline = time.monotonic() + config.SYNC_BUDGET_SECONDS
-    new = failed = 0
-    partial = False
-    after = None
-    for _ in range(20 if full_scan else max_pages):
-        page = resend_client.list_received(limit=100, after=after)
-        items = page.get("data") or []
-        page_new = 0
-        for item in items:
-            if time.monotonic() > deadline:
-                partial = True
+    """Pull received mail from Resend. Only one sync runs at a time per server instance."""
+    if not _sync_lock.acquire(blocking=False):
+        return {"new": 0, "failed": 0, "partial": False, "busy": True}
+    try:
+        ensure_mailboxes()
+        boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
+        deadline = time.monotonic() + config.SYNC_BUDGET_SECONDS
+        new = failed = 0
+        partial = False
+        after = None
+        for _ in range(20 if full_scan else max_pages):
+            page = resend_client.list_received(limit=100, after=after)
+            items = page.get("data") or []
+            page_new = 0
+            for item in items:
+                if time.monotonic() > deadline:
+                    partial = True
+                    break
+                r = ingest_received(item, boxes)
+                new += r["new"]
+                failed += r["failed"]
+                page_new += r["new"] + r["failed"]
+            if partial or not items or not page.get("has_more") or (page_new == 0 and not full_scan):
                 break
-            r = ingest_received(item, boxes)
-            new += r["new"]
-            failed += r["failed"]
-            page_new += r["new"] + r["failed"]
-        if partial or not items or not page.get("has_more") or (page_new == 0 and not full_scan):
-            break
-        after = items[-1]["id"]
-    return {"new": new, "failed": failed, "partial": partial}
+            after = items[-1]["id"]
+        return {"new": new, "failed": failed, "partial": partial}
+    finally:
+        _sync_lock.release()
 
 
 def _like(q: str) -> str:
@@ -204,22 +229,72 @@ def counts(user) -> dict:
     return {r["local_part"]: r["n"] for r in rows}
 
 
-def list_messages(user, local: str, folder: str, q: str = "") -> list[dict]:
+_SEARCH_OP_RE = re.compile(r'\b(from|to|subject|is):("[^"]*"|\S+)', re.I)
+MAX_PAGE = 200
+BULK_ACTIONS = ("read", "unread", "star", "unstar", "trash", "restore", "delete_forever")
+
+
+def parse_search(q: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split a Gmail-style query into free text and operators: from:, to:, subject:, is:unread|read|starred."""
+    ops = [(m.group(1).lower(), m.group(2).strip('"')) for m in _SEARCH_OP_RE.finditer(q or "")]
+    return _SEARCH_OP_RE.sub(" ", q or "").strip(), ops
+
+
+def list_messages(user, local: str, folder: str, q: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    """Messages of one mailbox. `folder` is inbox | sent | drafts, or the virtual views starred | trash."""
     box = _box_by_local(local, user)
-    sql = """select m.email_message_id as id, %s::text as mailbox, m.folder, coalesce(m.from_name,'') as from_name,
-                    m.from_address, m.subject, coalesce(m.snippet,'') as snippet, m.is_read,
-                    coalesce(m.received_at, m.sent_at, m.created_at) as created_at,
+    limit = max(1, min(int(limit), MAX_PAGE))
+    offset = max(0, int(offset))
+    # Drafts have no received/sent time (show last edit); trash orders by when it was deleted.
+    if folder == "drafts":
+        ts = "m.updated_at"
+    elif folder == "trash":
+        ts = "m.deleted_at"
+    else:
+        ts = "coalesce(m.received_at, m.sent_at, m.created_at)"
+    sql = f"""select m.email_message_id as id, %s::text as mailbox, m.folder, coalesce(m.from_name,'') as from_name,
+                    m.from_address, m.subject, coalesce(m.snippet,'') as snippet, m.is_read, m.is_starred,
+                    m.status::text as status, (m.deleted_at is not null) as deleted,
+                    {ts} as created_at,
                     coalesce((select jsonb_agg(r.email_address order by r.email_recipient_id) from email_recipients r
                               where r.email_message_id = m.email_message_id and r.recipient_type = 'to'), '[]'::jsonb) as to_addrs
              from email_messages m
-             where m.mailbox_id = %s and m.folder = %s and m.deleted_at is null"""
-    args = [local, box["mailbox_id"], folder]
-    if q.strip():
+             where m.mailbox_id = %s"""
+    args: list = [local, box["mailbox_id"]]
+    if folder == "trash":
+        sql += " and m.deleted_at is not null"
+    elif folder == "starred":
+        sql += " and m.is_starred and m.deleted_at is null and m.folder in ('inbox','sent')"
+    else:
+        sql += " and m.folder = %s and m.deleted_at is null"
+        args.append(folder)
+
+    text, ops = parse_search(q)
+    for op, value in ops:
+        if op == "from":
+            sql += " and (m.from_address ilike %s or m.from_name ilike %s)"
+            args += [_like(value)] * 2
+        elif op == "to":
+            sql += " and exists (select 1 from email_recipients r where r.email_message_id = m.email_message_id and r.recipient_type = 'to' and r.email_address ilike %s)"
+            args.append(_like(value))
+        elif op == "subject":
+            sql += " and m.subject ilike %s"
+            args.append(_like(value))
+        elif op == "is":
+            flag = value.lower()
+            if flag == "unread":
+                sql += " and not m.is_read"
+            elif flag == "read":
+                sql += " and m.is_read"
+            elif flag == "starred":
+                sql += " and m.is_starred"
+    if text:
         sql += """ and (m.subject ilike %s or m.from_address ilike %s or m.from_name ilike %s or m.text_body ilike %s
                    or exists (select 1 from email_recipients r where r.email_message_id = m.email_message_id
                               and r.email_address ilike %s))"""
-        args += [_like(q)] * 5
-    sql += " order by coalesce(m.received_at, m.sent_at, m.created_at) desc, m.email_message_id desc limit 200"
+        args += [_like(text)] * 5
+    sql += f" order by {ts} desc, m.email_message_id desc limit %s offset %s"
+    args += [limit, offset]
     with conn() as c:
         return c.execute(sql, args).fetchall()
 
@@ -230,9 +305,10 @@ def get_message(user, msg_id: int) -> dict | None:
         row = c.execute(
             """select m.email_message_id as id, mb.local_part as mailbox, m.mailbox_id, m.folder, coalesce(m.from_name,'') as from_name,
                       m.from_address, m.subject, m.text_body, m.html_body, m.is_read, m.message_id,
+                      m.is_starred, m.status::text as status, (m.deleted_at is not null) as deleted,
                       coalesce(m.received_at, m.sent_at, m.created_at) as created_at
                from email_messages m join mailboxes mb using (mailbox_id)
-               where m.email_message_id = %s and m.deleted_at is null""",
+               where m.email_message_id = %s""",
             (msg_id,),
         ).fetchone()
         if not row or row["mailbox_id"] not in allowed:
@@ -243,14 +319,17 @@ def get_message(user, msg_id: int) -> dict | None:
                 " order by email_recipient_id",
                 (msg_id, kind),
             ).fetchall()]
-        if row["folder"] == "inbox" and not row["is_read"]:
+        if row["folder"] == "inbox" and not row["is_read"] and not row["deleted"]:
             c.execute("update email_messages set is_read=true, updated_at=now() where email_message_id=%s", (msg_id,))
+            row["is_read"] = True
     row.pop("mailbox_id")
     return row
 
 
 def split_addrs(value: str) -> list[str]:
-    out = []
+    """Parse a comma/semicolon/newline separated address list; validates, de-duplicates, preserves order."""
+    out: list[str] = []
+    seen: set[str] = set()
     for part in re.split(r"[,;\n]+", value or ""):
         part = part.strip()
         if not part:
@@ -258,16 +337,21 @@ def split_addrs(value: str) -> list[str]:
         addr = parseaddr(part)[1]
         if not EMAIL_RE.match(addr):
             raise ValueError(f"Invalid email address: {part}")
-        out.append(addr)
+        if addr.lower() not in seen:
+            seen.add(addr.lower())
+            out.append(addr)
+    if len(out) > MAX_RECIPIENTS:
+        raise ValueError(f"Too many recipients (maximum {MAX_RECIPIENTS} per field)")
     return out
 
 
 def text_to_html(text: str) -> str:
-    body = htmllib.escape(text).replace("\r\n", "\n").replace("\n", "<br>")
+    body = htmllib.escape(text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
     return f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">{body}</div>'
 
 
-def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: str, reply_to_id=None) -> int:
+def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: str, reply_to_id=None,
+              draft_id: int | None = None) -> int:
     try:
         box = _box_by_local(local, user, sending=True)
     except LookupError:
@@ -279,9 +363,10 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
         raise ValueError("Write a subject or a message first")
 
     label = box["label"]
-    subject = subject.strip() or "(no subject)"
+    # Collapse any CR/LF so a subject can never inject extra mail headers.
+    subject = re.sub(r"\s+", " ", subject).strip()[:MAX_SUBJECT_LEN] or "(no subject)"
     payload = {
-        "from": f"{label} <{box['address']}>",
+        "from": formataddr((label, box["address"])),
         "to": to_l,
         "subject": subject,
         "text": body,
@@ -295,14 +380,37 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
     parent = None
     if reply_to_id:
         parent = get_message(user, int(reply_to_id))
-        if parent and parent.get("message_id"):
-            payload["headers"] = {
-                "In-Reply-To": parent["message_id"],
-                "References": parent["message_id"],
-            }
+    elif draft_id:
+        # A reply saved as a draft keeps its threading headers.
+        in_reply_to = _draft_in_reply_to(user, draft_id)
+        if in_reply_to:
+            parent = {"message_id": in_reply_to}
+    if parent and parent.get("message_id"):
+        payload["headers"] = {
+            "In-Reply-To": parent["message_id"],
+            "References": parent["message_id"],
+        }
 
     sent = resend_client.send(payload)
 
+    try:
+        mid = _store_sent(box, label, subject, body, payload["html"], sent.get("id"), parent, to_l, cc_l, bcc_l)
+    except Exception as exc:
+        # The email already went out; make sure that is visible in the logs and to the caller.
+        # The draft is deliberately kept so the text is not lost.
+        log.exception("Email %s was sent but could not be saved to Sent", sent.get("id"))
+        raise SentNotSaved("Message was sent, but it could not be saved to the Sent folder") from exc
+
+    if draft_id:
+        try:
+            delete_draft(user, draft_id)
+        except Exception:
+            log.warning("Could not remove draft %s after sending", draft_id, exc_info=True)
+    return mid
+
+
+def _store_sent(box, label, subject, body, html, resend_id, parent, to_l, cc_l, bcc_l) -> int:
+    parent_msg_id = (parent or {}).get("message_id")
     with conn() as c:
         row = c.execute(
             """insert into email_messages
@@ -312,15 +420,15 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
                returning email_message_id""",
             (
                 box["mailbox_id"],
-                (parent or {}).get("message_id"),
-                (parent or {}).get("message_id"),
+                parent_msg_id,
+                parent_msg_id,
                 box["address"],
                 label,
                 subject,
                 make_snippet(body, ""),
                 body,
-                payload["html"],
-                sent.get("id"),
+                html,
+                resend_id,
             ),
         ).fetchone()
         mid = row["email_message_id"]
@@ -332,3 +440,172 @@ def send_mail(user, local: str, to: str, cc: str, bcc: str, subject: str, body: 
                     (mid, kind, a.lower()),
                 )
     return mid
+
+
+# --- Drafts -----------------------------------------------------------------
+# Drafts live in email_messages (status 'draft', folder 'drafts'); their recipients use email_recipients.
+# No schema changes: both values already exist in the schema.
+
+def _lenient_addrs(value: str) -> list[str]:
+    """Like split_addrs, but silently skips incomplete addresses so half-typed fields can still be autosaved."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[,;\n]+", value or ""):
+        addr = parseaddr(part.strip())[1]
+        if addr and EMAIL_RE.match(addr) and addr.lower() not in seen:
+            seen.add(addr.lower())
+            out.append(addr)
+    return out[:MAX_RECIPIENTS]
+
+
+def _accessible_ids(user) -> list[int]:
+    return [r["mailbox_id"] for r in list_mailboxes(user)]
+
+
+def _draft_in_reply_to(user, draft_id: int) -> str | None:
+    with conn() as c:
+        row = c.execute(
+            "select in_reply_to from email_messages where email_message_id = %s and folder = 'drafts'"
+            " and status = 'draft' and mailbox_id = any(%s)",
+            (int(draft_id), _accessible_ids(user)),
+        ).fetchone()
+    return row["in_reply_to"] if row else None
+
+
+def save_draft(user, local: str, to: str, cc: str, bcc: str, subject: str, body: str,
+               draft_id: int | None = None, reply_to_id: int | None = None) -> dict:
+    """Create a draft, or update `draft_id` in place. Raises LookupError for an unknown mailbox/draft."""
+    box = _box_by_local(local, user)
+    to_l, cc_l, bcc_l = _lenient_addrs(to), _lenient_addrs(cc), _lenient_addrs(bcc)
+    subject = re.sub(r"\s+", " ", subject or "").strip()[:MAX_SUBJECT_LEN]
+    body = body or ""
+    if not draft_id and not (to_l or cc_l or bcc_l or subject or body.strip()):
+        return {"id": None, "saved_at": None}   # never create empty drafts
+
+    snippet = make_snippet(body, "")
+    with conn() as c:
+        if draft_id:
+            row = c.execute(
+                """update email_messages set mailbox_id = %s, from_address = %s, from_name = %s, subject = %s,
+                          snippet = %s, text_body = %s, updated_at = now()
+                   where email_message_id = %s and folder = 'drafts' and status = 'draft' and deleted_at is null
+                     and mailbox_id = any(%s)
+                   returning email_message_id, updated_at""",
+                (box["mailbox_id"], box["address"], box["label"], subject, snippet, body,
+                 int(draft_id), _accessible_ids(user)),
+            ).fetchone()
+            if not row:
+                raise LookupError("Draft not found")
+            c.execute("delete from email_recipients where email_message_id = %s", (row["email_message_id"],))
+        else:
+            parent_msg_id = None
+            if reply_to_id:
+                parent = get_message(user, int(reply_to_id))
+                parent_msg_id = (parent or {}).get("message_id")
+            row = c.execute(
+                """insert into email_messages
+                   (mailbox_id, direction, status, in_reply_to, references_header, from_address, from_name, subject,
+                    snippet, text_body, is_read, folder)
+                   values (%s,'outbound','draft',%s,%s,%s,%s,%s,%s,%s,true,'drafts')
+                   returning email_message_id, updated_at""",
+                (box["mailbox_id"], parent_msg_id, parent_msg_id, box["address"], box["label"], subject, snippet, body),
+            ).fetchone()
+        mid = row["email_message_id"]
+        for kind, addrs in (("to", to_l), ("cc", cc_l), ("bcc", bcc_l)):
+            for a in addrs:
+                c.execute(
+                    "insert into email_recipients (email_message_id, recipient_type, email_address)"
+                    " values (%s, %s::mail_recipient_type, %s)",
+                    (mid, kind, a.lower()),
+                )
+    return {"id": mid, "saved_at": row["updated_at"]}
+
+
+def delete_draft(user, draft_id: int) -> bool:
+    """Permanently discard a draft the user can access. Returns False if it does not exist."""
+    with conn() as c:
+        row = c.execute(
+            "delete from email_messages where email_message_id = %s and folder = 'drafts' and status = 'draft'"
+            " and mailbox_id = any(%s) returning email_message_id",
+            (int(draft_id), _accessible_ids(user)),
+        ).fetchone()
+    return bool(row)
+
+
+def draft_counts(user) -> dict:
+    with conn() as c:
+        rows = c.execute(
+            """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
+               where m.folder = 'drafts' and m.deleted_at is null and m.mailbox_id = any(%s)
+               group by mb.local_part""",
+            (_accessible_ids(user),),
+        ).fetchall()
+    return {r["local_part"]: r["n"] for r in rows}
+
+
+# --- Gmail-style message actions (stars, trash, read state) --------------------------------------
+# Uses only columns that already exist on email_messages: is_read, is_starred, deleted_at.
+
+_ACTION_SQL = {
+    # action: (SQL "set" clause + extra where) ; every statement is also scoped to the user's mailboxes
+    "read": "update email_messages set is_read = true, updated_at = now() where folder = 'inbox' and deleted_at is null and not is_read",
+    "unread": "update email_messages set is_read = false, updated_at = now() where folder = 'inbox' and deleted_at is null and is_read",
+    "star": "update email_messages set is_starred = true, updated_at = now() where folder in ('inbox','sent') and not is_starred",
+    "unstar": "update email_messages set is_starred = false, updated_at = now() where folder in ('inbox','sent') and is_starred",
+    "trash": "update email_messages set deleted_at = now(), updated_at = now() where folder in ('inbox','sent') and deleted_at is null",
+    "restore": "update email_messages set deleted_at = null, updated_at = now() where deleted_at is not null",
+    "delete_forever": "delete from email_messages where deleted_at is not null",
+}
+
+
+def update_messages(user, ids: list[int], action: str) -> int:
+    """Apply `action` to the given messages the user can access. Returns how many actually changed.
+
+    Drafts are never touched here (use delete_draft). delete_forever only removes messages already in Trash.
+    """
+    if action not in _ACTION_SQL:
+        raise ValueError("Unknown action")
+    ids = list({int(i) for i in ids})
+    if not ids:
+        return 0
+    if len(ids) > MAX_PAGE:
+        raise ValueError(f"Too many messages selected (maximum {MAX_PAGE})")
+    sql = _ACTION_SQL[action] + " and email_message_id = any(%s) and mailbox_id = any(%s) returning email_message_id"
+    with conn() as c:
+        return len(c.execute(sql, (ids, _accessible_ids(user))).fetchall())
+
+
+def empty_trash(user, local: str) -> int:
+    box = _box_by_local(local, user)
+    with conn() as c:
+        rows = c.execute(
+            "delete from email_messages where mailbox_id = %s and deleted_at is not null returning email_message_id",
+            (box["mailbox_id"],),
+        ).fetchall()
+    return len(rows)
+
+
+# --- Delivery status (Resend webhook events for mail we sent) --------------------------------------
+_DELIVERY_EVENTS = {
+    "email.delivered": "delivered",
+    "email.bounced": "bounced",
+    "email.complained": "complained",
+    "email.failed": "failed",
+}
+
+
+def apply_delivery_event(event_type: str, resend_email_id: str | None, event_id: str | None = None) -> int:
+    """Record delivered/bounced/... on the matching sent message. Bad outcomes always win; a late
+    'delivered' never overwrites a bounce. Returns the number of messages updated (0 if unknown)."""
+    status = _DELIVERY_EVENTS.get(event_type)
+    if not status or not resend_email_id:
+        return 0
+    with conn() as c:
+        rows = c.execute(
+            """update email_messages set status = %s::mail_message_status, resend_event_id = %s, updated_at = now()
+               where resend_email_id = %s and direction = 'outbound'
+                 and (status::text in ('sent','queued','delivered') or %s in ('bounced','complained','failed'))
+               returning email_message_id""",
+            (status, event_id, resend_email_id, status),
+        ).fetchall()
+    return len(rows)

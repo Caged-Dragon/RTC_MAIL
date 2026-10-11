@@ -1,8 +1,9 @@
 [project]
 name = "rtcrackers-mail"
-version = "1.0.0"
+version = "1.2.0"
 requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

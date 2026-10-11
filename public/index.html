@@ -4,47 +4,60 @@
   <meta charset="utf-8">
   <meta name="theme-color" content="#092b63">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RT Crackers business webmail">
+  <meta name="robots" content="noindex, nofollow">
   <title>RT Crackers Mail</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <noscript><p style="padding:24px;font-family:sans-serif">RT Crackers Mail needs JavaScript to run.</p></noscript>
   <div class="app" id="app" role="application" data-rtc-component="inbox">
     <aside class="side" data-rtc-component="sidebar">
       <div class="brand"><img class="brand-logo" alt="Company logo"><span class="company-brand-name">RT Crackers</span><span class="brand-product">Mail</span></div>
-      <div class="boxes" id="boxes" role="tablist" aria-label="Mailboxes"></div>
-      <button class="compose-btn" id="composeBtn">Compose</button>
-      <nav class="nav">
-        <button data-view="inbox">Inbox <b id="inboxCount"></b></button>
-        <button data-view="sent">Sent</button>
+      <button type="button" class="compose-btn" id="composeBtn"><span class="ic" data-icon="edit"></span><span>Compose</span></button>
+      <nav class="nav" aria-label="Folders">
+        <button type="button" class="on" data-view="inbox" aria-current="page"><span class="ic" data-icon="inbox"></span><span class="lbl">Inbox</span><b id="inboxCount"></b></button>
+        <button type="button" data-view="starred"><span class="ic" data-icon="star"></span><span class="lbl">Starred</span></button>
+        <button type="button" data-view="sent"><span class="ic" data-icon="send"></span><span class="lbl">Sent</span></button>
+        <button type="button" data-view="drafts"><span class="ic" data-icon="file"></span><span class="lbl">Drafts</span><b id="draftCount"></b></button>
+        <button type="button" data-view="trash"><span class="ic" data-icon="trash"></span><span class="lbl">Trash</span></button>
       </nav>
+      <div class="side-label">Mailboxes</div>
+      <div class="boxes" id="boxes" role="tablist" aria-label="Mailboxes"></div>
       <div class="side-foot">
-        <button class="ghost" id="syncBtn">Sync inbox</button>
-        <button class="ghost small" id="fullSyncBtn">Import older mail</button>
-        <div class="status" id="status"></div>
-        <div class="who"><span id="who"></span><button class="link" id="signOutBtn">Sign out</button></div>
+        <button type="button" class="ghost" id="syncBtn">Sync inbox</button>
+        <button type="button" class="ghost small" id="fullSyncBtn">Import older mail</button>
+        <button type="button" class="link small-link" id="helpBtn">Keyboard shortcuts (?)</button>
+        <div class="status" id="status" role="status"></div>
+        <div class="who"><span id="who"></span><button type="button" class="link" id="signOutBtn">Sign out</button></div>
       </div>
     </aside>
 
     <section class="list" id="listPane" data-rtc-component="message_list">
       <header class="list-head">
         <h2 id="listTitle">Inbox</h2>
-        <input type="search" id="search" placeholder="Search this folder" aria-label="Search">
+        <label class="searchbar"><span class="ic" data-icon="search"></span>
+          <input type="search" id="search" placeholder="Search mail (try from:name or is:unread)" aria-label="Search mail" autocomplete="off">
+        </label>
       </header>
+      <div class="toolbar" id="toolbar" role="toolbar" aria-label="Message actions"></div>
       <div class="rows" id="rows"></div>
     </section>
 
     <section class="reader" id="readerPane" data-rtc-component="reader"></section>
   </div>
 
+  <div class="overlay" id="help" hidden></div>
+
   <div class="login" id="login" hidden data-rtc-component="login_card">
     <div class="login-card">
       <div class="brand"><img class="brand-logo" alt="Company logo"><span class="company-brand-name">RT Crackers</span><span class="brand-product">Mail</span></div>
       <label for="lEmail">Email</label>
-      <input id="lEmail" type="email" autocomplete="username">
+      <input id="lEmail" type="email" autocomplete="username" autocapitalize="off" spellcheck="false">
       <label for="lPass">Password</label>
       <input id="lPass" type="password" autocomplete="current-password">
       <div class="login-err" id="lErr" role="alert"></div>
-      <button class="btn" id="lBtn">Sign in</button>
+      <button type="button" class="btn" id="lBtn">Sign in</button>
     </div>
   </div>
 
