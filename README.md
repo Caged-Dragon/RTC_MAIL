@@ -85,6 +85,16 @@ For local work without Supabase Auth set `MAIL_DEV_NO_AUTH=1` in `.env`.
 
 > **Keep secrets out of Git:** put real keys in `.env` (git-ignored), never in `.env.example`, which is committed and must stay empty. A unit test fails if a key ends up there.
 
+## Troubleshooting
+
+Open `https://<your-domain>/api/health`:
+
+- `{"ok":true}` - the app is running. If something else fails, the browser's Network tab shows a readable `detail` message (for example *SUPABASE_URL and SUPABASE_ANON_KEY are not configured* or *Database temporarily unavailable*).
+- `{"ok":false,"startup_error":"..."}` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
+- A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
+
+After adding or changing Environment Variables in Vercel, **redeploy** - changes only apply to new deployments. On Vercel use Supabase's **pooler** connection string for `DATABASE_URL`, not the direct `db.<ref>.supabase.co` host.
+
 ## Tests
 
 ```bash

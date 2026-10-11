@@ -6,7 +6,6 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
-from svix.webhooks import Webhook, WebhookVerificationError
 
 from . import auth, config, resend_client, service
 from .db import conn
@@ -236,6 +235,12 @@ async def resend_webhook(request: Request):
         raise HTTPException(503, "Webhook disabled: set RESEND_WEBHOOK_SECRET")
     raw = await request.body()
     headers = {k: v for k, v in request.headers.items() if k.lower() in _WEBHOOK_HEADERS}
+    try:
+        # Imported here, not at module level, so a problem with this library can never stop the whole app starting.
+        from svix.webhooks import Webhook, WebhookVerificationError
+    except ImportError:
+        log.exception("The svix package could not be imported")
+        raise HTTPException(503, "Webhook verification is unavailable")
     try:
         Webhook(config.RESEND_WEBHOOK_SECRET).verify(raw, headers)
     except WebhookVerificationError:

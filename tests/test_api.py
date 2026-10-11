@@ -294,3 +294,39 @@ class TestGmailStyleApi:
         r = client.post("/api/webhooks/resend", content=body, headers=signed_headers(body))
         assert r.status_code == 200 and r.json() == {"delivery": "email.bounced", "updated": 1}
         assert client.get("/api/messages?mailbox=sales&folder=sent").json()[0]["status"] == "bounced"
+
+
+class TestStartupResilience:
+    def test_import_failure_is_reported_on_health_instead_of_crashing(self, monkeypatch):
+        """If the application modules cannot load, /api/health must say why (not an opaque platform 500)."""
+        import sys
+
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setitem(sys.modules, "mailcore.routes", None)   # makes `from mailcore.routes import router` fail
+        sys.modules.pop("main", None)
+        try:
+            import main
+
+            r = TestClient(main.app).get("/api/health")
+            assert r.status_code == 503
+            body = r.json()
+            assert body["ok"] is False
+            assert "ImportError" in body["startup_error"] or "ModuleNotFoundError" in body["startup_error"]
+            assert r.headers["x-content-type-options"] == "nosniff"      # security headers still applied
+        finally:
+            sys.modules.pop("main", None)                                # next tests re-import the healthy app
+
+    def test_svix_is_not_needed_at_startup(self):
+        """A broken svix install may only affect the webhook, never the whole app."""
+        import subprocess, sys, textwrap
+
+        code = textwrap.dedent("""
+            import sys
+            sys.modules["svix"] = None; sys.modules["svix.webhooks"] = None
+            import main
+            assert main.STARTUP_ERROR is None, main.STARTUP_ERROR
+            print("started without svix")
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(config.ROOT))
+        assert "started without svix" in out.stdout, out.stderr[-500:]
