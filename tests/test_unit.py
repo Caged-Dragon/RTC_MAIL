@@ -158,3 +158,12 @@ class TestRepoHygiene:
 
         text = (config.ROOT / ".env.example").read_text(encoding="utf-8")
         assert not re.search(r"re_[A-Za-z0-9_]{16,}|eyJ[A-Za-z0-9_-]{20,}|whsec_[A-Za-z0-9+/=]{10,}", text)
+
+    def test_pyproject_dependencies_match_requirements_txt(self):
+        """Hosts such as Vercel may install from either file; they must never drift apart."""
+        import tomllib
+
+        declared = tomllib.loads((config.ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+        required = [l.strip() for l in (config.ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if l.strip() and not l.startswith("#")]
+        assert sorted(declared) == sorted(required)

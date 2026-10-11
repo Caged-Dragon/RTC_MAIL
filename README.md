@@ -93,6 +93,8 @@ Open `https://<your-domain>/api/health`:
 - `{"ok":false,"startup_error":"..."}` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
 - A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
 
+Dependencies are declared in **both** `requirements.txt` and `pyproject.toml` (a unit test keeps them identical), because hosts such as Vercel may install from either. If a deploy fails at startup with `No module named 'fastapi'`, the install step did not run - check the build log.
+
 After adding or changing Environment Variables in Vercel, **redeploy** - changes only apply to new deployments. On Vercel use Supabase's **pooler** connection string for `DATABASE_URL`, not the direct `db.<ref>.supabase.co` host.
 
 ## Tests
