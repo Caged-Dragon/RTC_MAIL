@@ -842,9 +842,10 @@ const LK_TEXT = {
   warning: "Almost locked: review the warnings below.",
   fail: "Not locked: another mail server can still receive company mail.",
 };
-function closeLock() { $("#lockPanel").hidden = true; }
+function closeLock() { const p = $("#lockPanel"); if (p) p.hidden = true; }
 function openLock(tab = "lock") {
   const box = $("#lockPanel");
+  if (!box) return;
   const body = h("div", {});
   const tabs = h("div", { class: "lk-tabs" },
     h("button", { type: "button", class: tab === "lock" ? "on" : "", onclick: () => openLock("lock") }, "Mail lock"),
@@ -913,7 +914,7 @@ async function start() {
 
   if (!S.cfg.mailboxes.some((m) => m.id === S.box)) S.box = S.cfg.mailboxes[0]?.id || "admin";
   $("#who").textContent = S.cfg.user;
-  $("#lockBtn").hidden = !S.cfg.is_admin;
+  { const lb = $("#lockBtn"); if (lb) lb.hidden = !S.cfg.is_admin; }
   const st = $("#status");
   st.textContent = S.cfg.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
   st.className = "status" + (S.cfg.resend_configured ? "" : " warn");
@@ -969,7 +970,7 @@ function onKey(e) {
   }
   if (!S.cfg || !$("#login").hidden) return;
   if (!$("#help").hidden) { if (e.key === "Escape" || e.key === "?") toggleHelp(false); return; }
-  if (!$("#lockPanel").hidden) { if (e.key === "Escape") closeLock(); return; }
+  if ($("#lockPanel") && !$("#lockPanel").hidden) { if (e.key === "Escape") closeLock(); return; }
   const k = e.key;
   if (gPending) {
     gPending = false;
@@ -1013,8 +1014,8 @@ function onKey(e) {
   $("#signOutBtn").addEventListener("click", signOut);
   $("#helpBtn").addEventListener("click", () => toggleHelp(true));
   $("#help").addEventListener("click", (e) => { if (e.target.id === "help") toggleHelp(false); });
-  $("#lockPanel").addEventListener("click", (e) => { if (e.target.id === "lockPanel") closeLock(); });
-  $("#lockBtn").addEventListener("click", () => openLock("lock"));
+  if ($("#lockPanel")) $("#lockPanel").addEventListener("click", (e) => { if (e.target.id === "lockPanel") closeLock(); });
+  if ($("#lockBtn")) $("#lockBtn").addEventListener("click", () => openLock("lock"));
   $("#lBtn").addEventListener("click", doLogin);
   $("#lPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("#lEmail").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#lPass").focus(); });

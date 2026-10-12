@@ -65,6 +65,46 @@ def health():
     return {"ok": True}
 
 
+@router.get("/diagnose")
+def diagnose(response: Response):
+    """Open https://<your-mail-domain>/api/diagnose when the site fails in the browser. Shows which settings the
+    server can see (yes/no only, never the values) and whether the database answers."""
+    import os
+    from urllib.parse import urlsplit
+
+    response.headers["Cache-Control"] = "no-store"
+    settings = {
+        "DATABASE_URL": bool(config.DATABASE_URL),
+        "SUPABASE_URL": bool(config.SUPABASE_URL),
+        "SUPABASE_ANON_KEY": bool(config.SUPABASE_ANON_KEY),
+        "RESEND_API_KEY": bool(config.RESEND_API_KEY),
+        "RESEND_WEBHOOK_SECRET": bool(config.RESEND_WEBHOOK_SECRET),
+    }
+    database, hint = "not configured", ""
+    if config.DATABASE_URL:
+        try:
+            with conn() as c:
+                c.execute("select 1")
+            database = "connected"
+        except Exception as exc:  # report the kind of failure, never the connection string
+            database = "failed: " + type(exc).__name__
+            host = urlsplit("//" + config.DATABASE_URL.rsplit("@", 1)[-1].split("://")[-1]).hostname or ""
+            if host.startswith("db.") and host.endswith(".supabase.co"):
+                hint = ("DATABASE_URL uses the direct 'db.<project>.supabase.co' address, which many hosts (including Vercel) cannot reach. "
+                        "Use the pooler address from Supabase > Connect > Transaction pooler (aws-0-...pooler.supabase.com:6543).")
+            else:
+                hint = "Check the user, password (URL-encode special characters) and that the project is not paused."
+    missing = [k for k, ok in settings.items() if not ok]
+    return {
+        "ok": not missing and database == "connected",
+        "settings_present": settings,
+        "database": database,
+        "hint": hint or (("Add the missing settings in your host's environment variables, then redeploy: " + ", ".join(missing)) if missing else ""),
+        "running_on_vercel": bool(os.getenv("VERCEL")),
+        "dev_no_auth_active": config.DEV_NO_AUTH,
+    }
+
+
 @router.post("/auth/login")
 def login(body: LoginIn, response: Response):
     response.headers["Cache-Control"] = "no-store"

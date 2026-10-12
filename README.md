@@ -61,7 +61,7 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 
 1. Push this folder to a GitHub repo and import it in Vercel (Framework: Other/FastAPI; no build command).
 2. Add the variables from `.env.example` (see `ENVIRONMENT.md`).
-3. Deploy, open the site, and sign in with the Supabase Auth user `admin@rtcrackers.com`.
+3. Deploy, open the site, and sign in with any active admin ID (`admin@` or `developer@`). If it fails, open `/api/diagnose`.
 4. Use **Import older mail** once for the first import.
 5. In Resend, point the webhook at `https://<your-domain>/api/webhooks/resend`, enable **email.received** plus the delivery events (**email.delivered, email.bounced, email.complained, email.failed**), and set `RESEND_WEBHOOK_SECRET`.
 
@@ -73,7 +73,7 @@ The server holds the Postgres connection; the database URL is never exposed to t
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Supabase Auth |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` | Resend sending/receiving and webhook verification |
 | `MAIL_DOMAIN` | Company mail domain (default `rtcrackers.com`) |
-| `MAIL_ADMIN_EMAIL` | The one account allowed to sign in (default `admin@<MAIL_DOMAIN>`) |
+| `MAIL_ADMIN_EMAIL` | Legacy and optional: every active admin in `admin_access` can sign in |
 | `SYNC_BUDGET_SECONDS` | Time limit for one sync (default 45) |
 | `MAIL_DEV_NO_AUTH=1` | Local development only; ignored on Vercel |
 
