@@ -58,20 +58,15 @@ class TestAuthRequired:
     def test_empty_bearer_token_rejected(self, client):
         assert client.get("/api/counts", headers={"authorization": "Bearer "}).status_code == 401
 
-    def test_login_rejects_account_without_admin_or_mailbox_access(self, client, monkeypatch):
-        monkeypatch.setattr(auth.httpx, "post", lambda *a, **k: httpx.Response(
-            200, json={"access_token": "a", "refresh_token": "r", "user": {"id": "u9", "email": "someone@else.com"}}))
-        monkeypatch.setattr(auth, "load_permissions", lambda uid, email: (False, set()))
+    def test_login_restricted_to_admin_email(self, client):
         r = client.post("/api/auth/login", json={"email": "someone@else.com", "password": "x"})
-        assert r.status_code == 401 and r.json()["detail"] == auth.LOGIN_FAILED   # same message as a wrong password
+        assert r.status_code == 403 and config.ADMIN_EMAIL in r.json()["detail"]
 
-    @pytest.mark.parametrize("email", ["admin@rtcrackers.com", "developer@rtcrackers.com"])
-    def test_every_active_admin_id_can_sign_in(self, client, monkeypatch, email):
+    def test_login_success_returns_tokens(self, client, monkeypatch):
         monkeypatch.setattr(auth.httpx, "post", lambda *a, **k: httpx.Response(
-            200, json={"access_token": "a", "refresh_token": "r", "user": {"id": "u1", "email": email}}))
-        monkeypatch.setattr(auth, "load_permissions", lambda uid, e: (True, set()))
-        r = client.post("/api/auth/login", json={"email": f" {email} ", "password": "pw"})
-        assert r.status_code == 200 and r.json()["access_token"] == "a" and "uid" not in r.json()
+            200, json={"access_token": "a", "refresh_token": "r", "user": {"email": config.ADMIN_EMAIL}}))
+        r = client.post("/api/auth/login", json={"email": f" {config.ADMIN_EMAIL} ", "password": "pw"})
+        assert r.status_code == 200 and r.json()["access_token"] == "a"
         assert r.headers["cache-control"] == "no-store"
 
     def test_wrong_password_is_401(self, client, monkeypatch):
@@ -299,3 +294,93 @@ class TestGmailStyleApi:
         r = client.post("/api/webhooks/resend", content=body, headers=signed_headers(body))
         assert r.status_code == 200 and r.json() == {"delivery": "email.bounced", "updated": 1}
         assert client.get("/api/messages?mailbox=sales&folder=sent").json()[0]["status"] == "bounced"
+
+
+class TestStartupResilience:
+    def test_import_failure_is_reported_on_health_instead_of_crashing(self, monkeypatch):
+        """If the application modules cannot load, /api/health must say why (not an opaque platform 500)."""
+        import sys
+
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setitem(sys.modules, "mailcore.routes", None)   # makes `from mailcore.routes import router` fail
+        sys.modules.pop("main", None)
+        try:
+            import main
+
+            r = TestClient(main.app).get("/api/health")
+            assert r.status_code == 503
+            body = r.json()
+            assert body["ok"] is False
+            assert "ImportError" in body["startup_error"] or "ModuleNotFoundError" in body["startup_error"]
+            assert r.headers["x-content-type-options"] == "nosniff"      # security headers still applied
+        finally:
+            sys.modules.pop("main", None)                                # next tests re-import the healthy app
+
+    def test_svix_is_not_needed_at_startup(self):
+        """A broken svix install may only affect the webhook, never the whole app."""
+        import subprocess, sys, textwrap
+
+        code = textwrap.dedent("""
+            import sys
+            sys.modules["svix"] = None; sys.modules["svix.webhooks"] = None
+            import main
+            assert main.STARTUP_ERROR is None, main.STARTUP_ERROR
+            print("started without svix")
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(config.ROOT))
+        assert "started without svix" in out.stdout, out.stderr[-500:]
+
+
+class TestSpeedEndpoints:
+    def test_bootstrap_gives_the_whole_first_screen_in_one_response(self, client, db, monkeypatch):
+        monkeypatch.setattr(resend_client, "get_received", lambda i: {"from": "j@example.com", "subject": "S", "text": "T"})
+        client.get("/api/config")
+        service.ingest_received({"id": "z1", "to": ["sales@rtcrackers.com"]})
+        r = client.get("/api/bootstrap?mailbox=sales")
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+        body = r.json()
+        assert body["mailbox"] == "sales" and body["folder"] == "inbox"
+        assert [m["id"] for m in body["mailboxes"]][:2] == ["admin", "sales"]
+        assert body["counts"] == {"sales": 1} and body["drafts"] == {} and len(body["items"]) == 1
+        assert set(body) >= {"domain", "user", "resend_configured", "webhook_configured", "latest"}
+
+    def test_bootstrap_validation_and_fallbacks(self, client, db):
+        assert client.get("/api/bootstrap?folder=bogus").status_code == 400
+        assert client.get("/api/bootstrap?mailbox=" + "x" * 65).status_code == 422
+        assert client.get("/api/bootstrap?mailbox=nope").json()["mailbox"] == "admin"
+
+    def test_webhook_flag_follows_the_configuration(self, client, db, monkeypatch):
+        monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "")
+        assert client.get("/api/bootstrap").json()["webhook_configured"] is False
+        monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "whsec_x")
+        assert client.get("/api/bootstrap").json()["webhook_configured"] is True
+        assert client.get("/api/config").json()["webhook_configured"] is True
+
+    def test_pulse_shape(self, client, db):
+        client.get("/api/config")
+        r = client.get("/api/pulse")
+        assert r.status_code == 200 and r.json() == {"counts": {}, "latest": {}, "drafts": {}}
+        assert r.headers["cache-control"] == "no-store"
+
+    def test_branding_returns_defaults_when_tables_are_missing(self, client, db):
+        r = client.get("/api/branding")
+        assert r.status_code == 200 and r.json() == {"theme": {"components": []}, "company": {}}
+
+    def test_new_endpoints_require_sign_in(self, client, monkeypatch):
+        monkeypatch.setattr(config, "DEV_NO_AUTH", False)
+        assert client.get("/api/bootstrap").status_code == 401
+        assert client.get("/api/pulse").status_code == 401
+        assert client.get("/api/branding").status_code != 401     # public: it styles the login screen
+
+    def test_static_files_are_cacheable_but_the_api_is_not(self, client):
+        for path in ("/", "/app.js", "/style.css"):
+            cc = client.get(path).headers["cache-control"]
+            assert "s-maxage" in cc and "public" in cc, path
+        assert "cache-control" not in client.get("/api/health").headers
+        assert client.get("/api/pulse").headers.get("cache-control") != client.get("/").headers["cache-control"]
+
+    def test_database_outage_on_bootstrap_is_clean_json(self, client, monkeypatch):
+        monkeypatch.setattr(config, "DATABASE_URL", "")
+        r = client.get("/api/bootstrap")
+        assert r.status_code == 503 and "detail" in r.json()

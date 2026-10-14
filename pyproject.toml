@@ -2,14 +2,12 @@
 name = "rtcrackers-mail"
 version = "1.2.0"
 requires-python = ">=3.12"
-# Vercel installs from THIS list (not from requirements.txt) whenever pyproject.toml exists.
-# Keep it identical to requirements.txt; tests/test_packaging.py fails if they drift apart.
 dependencies = [
-    "fastapi[standard]>=0.115,<1",
-    "httpx>=0.28,<1",
-    "python-dotenv>=1.0,<2",
-    "svix>=1.50,<2",
-    "psycopg[binary]>=3.2,<4",
+  "fastapi[standard]>=0.115,<1",
+  "httpx>=0.28,<1",
+  "python-dotenv>=1.0,<2",
+  "svix>=1.50,<2",
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [tool.pytest.ini_options]

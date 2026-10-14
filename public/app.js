@@ -1,6 +1,7 @@
 // RT Crackers Mail - vanilla JS, no build step.
 const $ = (s) => document.querySelector(s);
 const SYNC_INTERVAL_MS = 60000;
+const PULSE_INTERVAL_MS = 20000;   // cheap 'anything new?' check
 const AUTOSAVE_MS = 1500;
 const PAGE_SIZE = 50;
 // Detects remote resources in mail HTML (src/srcset/background attributes and CSS url()).
@@ -14,8 +15,9 @@ const session = {
 };
 
 
+const savedBox = (() => { try { return localStorage.getItem("rtmail.box"); } catch { return null; } })();
 const S = {
-  cfg: null, box: "admin", view: "inbox", openId: null, openMsg: null,
+  cfg: null, box: savedBox || "admin", latest: {}, syncTimer: null, view: "inbox", openId: null, openMsg: null,
   counts: {}, drafts: {}, q: "", timer: null, listReq: 0, syncing: false,
   compose: null, prevView: "inbox",
   items: [], sel: new Set(), cur: -1, hasMore: false, loading: false,
@@ -30,38 +32,40 @@ const EMPTY = {
 };
 const enc = encodeURIComponent;
 
-async function applyCompanyBrand() {
-  try {
-    const res = await fetch("/api/company");
-    if (!res.ok) return;
-    const company = await res.json();
-    document.querySelectorAll(".brand").forEach((brand) => {
-      const name = brand.querySelector(".company-brand-name");
-      const logo = brand.querySelector(".brand-logo");
-      if (name && company.company_name) name.textContent = company.company_name;
-      if (logo) {
-        if (company.logo_url) { logo.src = company.logo_url; logo.alt = company.company_name ? company.company_name + " logo" : "Company logo"; logo.hidden = false; }
-        else logo.hidden = true;
-      }
-    });
-  } catch {}
+function applyCompany(company) {
+  document.querySelectorAll(".brand").forEach((brand) => {
+    const name = brand.querySelector(".company-brand-name");
+    const logo = brand.querySelector(".brand-logo");
+    if (name && company.company_name) name.textContent = company.company_name;
+    if (logo) {
+      if (company.logo_url) { logo.src = company.logo_url; logo.alt = company.company_name ? company.company_name + " logo" : "Company logo"; logo.hidden = false; }
+      else logo.hidden = true;
+    }
+  });
 }
 
-async function applyDbTheme() {
+function applyTheme(t) {
+  const root = document.documentElement;
+  const vars = {
+    "--rtc-bg": t.background_color, "--rtc-surface": t.surface_color,
+    "--rtc-text": t.text_color, "--rtc-muted": t.muted_text_color,
+    "--rtc-heading": t.heading_color, "--rtc-primary": t.primary_color,
+    "--rtc-accent": t.accent_color, "--rtc-border": t.border_color,
+    "--rtc-header": t.header_color, "--rtc-nav": t.nav_background_color,
+    "--rtc-nav-text": t.nav_text_color
+  };
+  for (const [k, v] of Object.entries(vars)) if (v) root.style.setProperty(k, v);
+}
+
+// Theme + company logo in ONE request. Called after the first screen is on display so it never competes
+// with (or cold-starts a second copy of) the server for the data the user is waiting for.
+async function loadBranding() {
   try {
-    const res = await fetch("/api/theme");
+    const res = await fetch("/api/branding");
     if (!res.ok) return;
-    const t = await res.json();
-    const root = document.documentElement;
-    const vars = {
-      "--rtc-bg": t.background_color, "--rtc-surface": t.surface_color,
-      "--rtc-text": t.text_color, "--rtc-muted": t.muted_text_color,
-      "--rtc-heading": t.heading_color, "--rtc-primary": t.primary_color,
-      "--rtc-accent": t.accent_color, "--rtc-border": t.border_color,
-      "--rtc-header": t.header_color, "--rtc-nav": t.nav_background_color,
-      "--rtc-nav-text": t.nav_text_color
-    };
-    for (const [k, v] of Object.entries(vars)) if (v) root.style.setProperty(k, v);
+    const data = await res.json();
+    applyCompany(data.company || {});
+    applyTheme(data.theme || {});
   } catch {}
 }
 
@@ -403,7 +407,7 @@ async function bulk(action, ids) {
   S.sel = new Set();
   if (S.openId && ids.includes(S.openId) && ["trash", "restore", "delete_forever", "unread"].includes(action)) closeReader();
   applyLocal(action, ids);
-  refreshCounts();
+  scheduleRefresh();
 
   if (action === "trash") {
     toast(`${n} message${plural} moved to Trash`, false, { label: "Undo", run: async () => { await bulk("restore", ids); loadList(); } });
@@ -454,11 +458,18 @@ function closeReader() {
 async function openMessage(id) {
   let m;
   try { m = await api(`/messages/${id}`); } catch (e) { return toast(e.message, true); }
+  const listed = S.items.find((x) => x.id === id);
+  const wasUnread = !!listed && !listed.is_read && m.folder === "inbox" && !m.deleted;
   S.openId = id;
   S.openMsg = m;
   markRowOpen(id);
   $("#app").classList.add("reading");
-  if (m.folder === "inbox" && !m.deleted) refreshCounts();   // opening a message marks it read on the server
+  if (wasUnread) {   // the server marked it read; update the badge here instead of asking for new counts
+    const k = m.mailbox;
+    S.counts[k] = Math.max(0, (S.counts[k] || 0) - 1);
+    if (!S.counts[k]) delete S.counts[k];
+    renderBoxes();
+  }
   renderReader(m);
 }
 
@@ -641,10 +652,10 @@ function renderCompose(p = {}) {
       try {
         const r = await api("/drafts", { method: "POST", body: JSON.stringify(payload()) });
         if (r.id) {
+          if (!c.draftId) bumpDrafts(from.value, 1);
           c.draftId = r.id;
           discard.textContent = "Delete draft";
           status.textContent = "Draft saved at " + new Date().toLocaleTimeString([], { timeStyle: "short" });
-          refreshCounts();
         } else status.textContent = "";
       } catch (e) {
         c.dirty = true;
@@ -736,13 +747,14 @@ function setView(view) {
   readerPlaceholder();
   renderRows();
   saving.then(() => {
-    if (wasComposing) refreshCounts();   // draft counts may have changed
+    if (wasComposing) scheduleRefresh();   // draft counts may have changed
     if (S.view === view) loadList();     // ignore if the user already moved on
   });
 }
 
 function selectBox(id) {
   S.box = id;
+  rememberBox();
   renderBoxes();
   setView(S.view === "compose" ? "inbox" : S.view);
 }
@@ -760,8 +772,10 @@ async function sync(silent = false, full = false) {
     if (r.new) toast(`${r.new} new message${r.new > 1 ? "s" : ""}`);
     else if (!silent) toast(r.failed ? `Inbox synced, but ${r.failed} message(s) could not be downloaded` : "Inbox is up to date");
     if (r.partial && !silent) toast("Sync stopped early to stay within the time limit. Run it again to continue.");
-    await refreshCounts();
-    if (r.new && S.view === "inbox") loadList();   // don't redraw the list when nothing changed
+    if (r.new) {
+      await refreshCounts();
+      if (S.view === "inbox") loadList();   // don't redraw the list when nothing changed
+    }
   } catch (e) {
     if (!silent) toast(e.message, true);
   } finally {
@@ -771,10 +785,42 @@ async function sync(silent = false, full = false) {
   }
 }
 
-async function refreshCounts() {
-  try { S.counts = await api("/counts"); } catch {}
-  try { S.drafts = await api("/counts/drafts"); } catch {}
+// Applies a /pulse result. Returns true when the mailbox being viewed received newer inbox mail.
+function applyPulse(p) {
+  const had = S.latest[S.box] || 0;
+  S.counts = p.counts || {};
+  S.drafts = p.drafts || {};
+  S.latest = p.latest || {};
   if (S.cfg) renderBoxes();
+  return (S.latest[S.box] || 0) > had;
+}
+
+async function refreshCounts() {
+  let p;
+  try { p = await api("/pulse"); } catch { return false; }
+  return applyPulse(p);
+}
+
+let refreshTimer;
+function scheduleRefresh(delay = 700) {   // several quick actions (e.g. trashing 5 messages) cost one request
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refreshCounts, delay);
+}
+
+function bumpDrafts(box, delta) {
+  S.drafts[box] = Math.max(0, (S.drafts[box] || 0) + delta);
+  if (!S.drafts[box]) delete S.drafts[box];
+  if (S.cfg) renderBoxes();
+}
+
+async function pollPulse() {
+  if (document.hidden || !S.cfg) return;
+  let p;
+  try { p = await api("/pulse"); } catch { return; }
+  if (applyPulse(p)) {
+    toast("New mail");
+    if (S.view === "inbox" && !S.q) loadList();
+  }
 }
 
 function showLogin() {
@@ -785,12 +831,18 @@ function showLogin() {
 
 function stopAutoSync() {
   clearInterval(S.timer);
-  S.timer = null;
+  clearInterval(S.syncTimer);
+  S.timer = S.syncTimer = null;
 }
 
 function startAutoSync() {
   stopAutoSync();
-  S.timer = setInterval(() => { if (!document.hidden) sync(true); }, SYNC_INTERVAL_MS);
+  S.timer = setInterval(pollPulse, PULSE_INTERVAL_MS);   // one tiny query: shows mail the webhook already stored
+  if (S.cfg && S.cfg.resend_configured) {
+    // With the Resend webhook set up, mail arrives instantly and this is only a safety net.
+    const every = S.cfg.webhook_configured ? 10 * 60000 : SYNC_INTERVAL_MS;
+    S.syncTimer = setInterval(() => { if (!document.hidden) sync(true); }, every);
+  }
 }
 
 async function doLogin() {
@@ -834,97 +886,33 @@ async function signOut() {
   showLogin();
 }
 
-
-// ---------------------------------------------------------------- mail lock & archive (administrators)
-const LK_ICON = { ok: "✓", warning: "!", fail: "✕" };
-const LK_TEXT = {
-  ok: "Locked: company mail is held only by this system.",
-  warning: "Almost locked: review the warnings below.",
-  fail: "Not locked: another mail server can still receive company mail.",
-};
-function closeLock() { const p = $("#lockPanel"); if (p) p.hidden = true; }
-function openLock(tab = "lock") {
-  const box = $("#lockPanel");
-  if (!box) return;
-  const body = h("div", {});
-  const tabs = h("div", { class: "lk-tabs" },
-    h("button", { type: "button", class: tab === "lock" ? "on" : "", onclick: () => openLock("lock") }, "Mail lock"),
-    h("button", { type: "button", class: tab === "archive" ? "on" : "", onclick: () => openLock("archive") }, "Archive"));
-  box.replaceChildren(h("div", { class: "card", role: "dialog", "aria-modal": "true", "aria-label": "Mail lock and archive" },
-    h("div", { class: "card-head" }, h("h2", {}, "Mail lock & archive"), iconBtn("close", "Close", closeLock)), tabs, body));
-  box.hidden = false;
-  if (tab === "lock") lockTab(body); else archiveTab(body);
-}
-async function lockTab(body, refresh = false) {
-  body.replaceChildren(h("p", {}, "Checking your domain's DNS…"));
-  try {
-    const r = await api("/compliance" + (refresh ? "?refresh=true" : ""));
-    body.replaceChildren(
-      h("div", { class: "lk-banner " + r.status }, LK_TEXT[r.status] || r.status),
-      r.checks.map((c) => h("div", { class: "lk-check " + c.status },
-        h("span", { class: "dot" }, LK_ICON[c.status] || "?"),
-        h("div", {}, h("b", {}, c.title), h("div", {}, c.detail)),
-        c.fix ? h("div", { class: "fix" }, "How to fix: " + c.fix) : null)),
-      h("p", {}, h("button", { type: "button", class: "ghost", onclick: () => lockTab(body, true) }, "Check again")));
-  } catch (e) { body.replaceChildren(h("p", {}, e.message)); }
-}
-function archiveTab(body) {
-  const list = h("div", {});
-  const detail = h("div", { class: "lk-msg" });
-  const q = h("input", { type: "search", placeholder: "Search the archive (sender, subject, text, recipient)", "aria-label": "Search archive" });
-  const sel = h("select", { "aria-label": "Mailbox" }, h("option", { value: "" }, "All mailboxes"),
-    S.cfg.mailboxes.map((m) => h("option", { value: m.id }, m.id)));
-  let t;
-  const load = async () => {
-    try {
-      const rows = await api("/archive?limit=100&q=" + enc(q.value) + "&mailbox=" + enc(sel.value));
-      list.replaceChildren(rows.length ? rows.map((m) => h("button", { type: "button", class: "lk-row", onclick: () => show(m.archive_id) },
-        h("b", {}, m.subject || "(no subject)"), m.in_mailbox ? null : h("span", { class: "lk-tag" }, "removed from mailbox"),
-        h("small", {}, `${m.direction === "inbound" ? "From" : "To/From"} ${m.from_name || m.from_address} · ${m.mailbox_address} · ${fmtShort(m.ts)}`),
-        h("small", {}, m.snippet))) : h("p", {}, "Nothing archived matches."));
-    } catch (e) { list.replaceChildren(h("p", {}, e.message)); }
-  };
-  const show = async (id) => {
-    try {
-      const m = await api("/archive/" + id);
-      const names = (a) => a.map((x) => x.email_address).join(", ") || "—";
-      let text = m.text_body || "";
-      if (!text && m.html_body) text = new DOMParser().parseFromString(m.html_body, "text/html").body.textContent.trim();
-      detail.replaceChildren(h("hr", {}), h("dl", {},
-        h("dt", {}, "From"), h("dd", {}, `${m.from_name ? m.from_name + " " : ""}<${m.from_address}>`),
-        h("dt", {}, "To"), h("dd", {}, names(m.to_addrs)), h("dt", {}, "Cc"), h("dd", {}, names(m.cc_addrs)),
-        m.bcc_addrs.length ? [h("dt", {}, "Bcc"), h("dd", {}, names(m.bcc_addrs))] : null,
-        h("dt", {}, "Subject"), h("dd", {}, m.subject || "(no subject)"),
-        h("dt", {}, "Date"), h("dd", {}, fmtShort(m.received_at || m.sent_at || m.archived_at)),
-        h("dt", {}, "Seal"), h("dd", {}, "SHA-256 " + m.content_sha256.slice(0, 16) + "…")),
-        h("pre", {}, text || "(no text content)"));
-      detail.scrollIntoView({ block: "nearest" });
-    } catch (e) { detail.replaceChildren(h("p", {}, e.message)); }
-  };
-  q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
-  sel.addEventListener("change", load);
-  body.replaceChildren(h("p", {}, "Every message ever received or sent is kept here permanently, even after it is deleted from a mailbox."),
-    h("div", { class: "lk-bar" }, q, sel), list, detail);
-  load();
-}
-
 async function start() {
-  try { S.cfg = await api("/config"); }
+  let b;
+  try { b = await api(`/bootstrap?mailbox=${enc(S.box)}&folder=inbox`); }   // ONE request: mailboxes, counts, first page
   catch (e) { session.clear(); showLogin(); $("#lErr").textContent = e.message; return; }
 
-  if (!S.cfg.mailboxes.some((m) => m.id === S.box)) S.box = S.cfg.mailboxes[0]?.id || "admin";
-  $("#who").textContent = S.cfg.user;
-  { const lb = $("#lockBtn"); if (lb) lb.hidden = !S.cfg.is_admin; }
+  S.cfg = { domain: b.domain, user: b.user, mailboxes: b.mailboxes, resend_configured: b.resend_configured, webhook_configured: b.webhook_configured };
+  S.box = b.mailbox || S.box;
+  S.counts = b.counts || {}; S.drafts = b.drafts || {}; S.latest = b.latest || {};
+  $("#who").textContent = b.user;
   const st = $("#status");
-  st.textContent = S.cfg.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
-  st.className = "status" + (S.cfg.resend_configured ? "" : " warn");
-  await refreshCounts();
-  setView("inbox");
-  if (S.cfg.resend_configured) {
-    sync(true);
-    startAutoSync();
-  }
+  st.textContent = b.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
+  st.className = "status" + (b.resend_configured ? "" : " warn");
+
+  S.view = "inbox"; S.openId = null; S.openMsg = null; S.sel = new Set(); S.cur = -1;
+  S.items = b.items || []; S.hasMore = S.items.length === PAGE_SIZE; S.loading = false;
+  rememberBox();
+  renderNav(); renderBoxes();
+  $("#listTitle").textContent = TITLES.inbox;
+  readerPlaceholder();
+  renderRows();                                        // the first screen is now on display
+
+  startAutoSync();
+  loadBranding();                                      // after first paint, one request, cached by the CDN
+  if (b.resend_configured) setTimeout(() => sync(true), 4000);   // one catch-up sync once the screen is already usable
 }
+
+function rememberBox() { try { localStorage.setItem("rtmail.box", S.box); } catch {} }
 
 // ---------------------------------------------------------------- keyboard shortcuts
 const SHORTCUTS = [
@@ -970,7 +958,6 @@ function onKey(e) {
   }
   if (!S.cfg || !$("#login").hidden) return;
   if (!$("#help").hidden) { if (e.key === "Escape" || e.key === "?") toggleHelp(false); return; }
-  if ($("#lockPanel") && !$("#lockPanel").hidden) { if (e.key === "Escape") closeLock(); return; }
   const k = e.key;
   if (gPending) {
     gPending = false;
@@ -1004,8 +991,6 @@ function onKey(e) {
 }
 
 (function init() {
-  applyCompanyBrand();
-  applyDbTheme();
   document.querySelectorAll("[data-icon]").forEach((el) => { el.innerHTML = svg(el.dataset.icon); });
   $("#composeBtn").addEventListener("click", () => S.cfg && setView("compose"));
   document.querySelectorAll(".nav button").forEach((b) => b.addEventListener("click", () => S.cfg && setView(b.dataset.view)));
@@ -1014,8 +999,6 @@ function onKey(e) {
   $("#signOutBtn").addEventListener("click", signOut);
   $("#helpBtn").addEventListener("click", () => toggleHelp(true));
   $("#help").addEventListener("click", (e) => { if (e.target.id === "help") toggleHelp(false); });
-  if ($("#lockPanel")) $("#lockPanel").addEventListener("click", (e) => { if (e.target.id === "lockPanel") closeLock(); });
-  if ($("#lockBtn")) $("#lockBtn").addEventListener("click", () => openLock("lock"));
   $("#lBtn").addEventListener("click", doLogin);
   $("#lPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("#lEmail").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#lPass").focus(); });
@@ -1027,7 +1010,7 @@ function onKey(e) {
     t = setTimeout(() => { S.q = e.target.value; if (S.cfg && S.view !== "compose") { S.sel = new Set(); loadList(); } }, 250);
   });
   // Catch up immediately when the tab becomes visible again after being in the background.
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.cfg && S.timer) sync(true); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.cfg) pollPulse(); });
   // Never lose typing: warn on tab close with unsaved edits, and save when the tab is hidden.
   window.addEventListener("beforeunload", (e) => {
     if (S.compose && S.compose.dirty && !S.compose.closed) { e.preventDefault(); e.returnValue = ""; }
@@ -1037,5 +1020,5 @@ function onKey(e) {
   });
   readerPlaceholder();
   renderToolbar();
-  if (session.get()) start(); else showLogin();
+  if (session.get()) start(); else { showLogin(); loadBranding(); }
 })();

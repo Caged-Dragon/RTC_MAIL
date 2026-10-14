@@ -70,6 +70,19 @@ def db(db_available):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_shared_caches(monkeypatch):
+    """The app caches mailboxes and the 'mailboxes exist' check in memory. Tests rebuild the database constantly,
+    so caching is switched off by default (tests that exercise the caches turn it back on)."""
+    from mailcore import service
+
+    monkeypatch.setattr(service, "MAILBOX_CACHE_TTL", 0.0)
+    monkeypatch.setattr(service, "ENSURE_TTL", 0.0)
+    service.clear_caches()
+    yield
+    service.clear_caches()
+
+
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient

@@ -441,10 +441,126 @@ def test_delivery_events_update_sent_status(inbox3, fake_resend):
     assert service.apply_delivery_event("email.delivered", None) == 0
 
 
-def test_mail_for_unknown_company_address_lands_in_catch_all(db, fake_resend):
-    """Resend delivers every address at the domain; mail for an address with no mailbox must not be lost."""
+# --- Speed: caching, one-connection bootstrap, batched sync ------------------------------------------
+
+@pytest.fixture
+def conn_counter(monkeypatch):
+    """Counts how many database connections the service layer opens."""
+    n = {"n": 0}
+    real = service.conn
+
+    def counting():
+        n["n"] += 1
+        return real()
+
+    monkeypatch.setattr(service, "conn", counting)
+    return n
+
+
+@pytest.fixture
+def caches_on(monkeypatch):
+    monkeypatch.setattr(service, "MAILBOX_CACHE_TTL", 120.0)
+    monkeypatch.setattr(service, "ENSURE_TTL", 600.0)
+    service.clear_caches()
+
+
+def test_mailbox_list_is_cached_until_cleared(db, caches_on, conn_counter):
     service.ensure_mailboxes()
-    r = service.ingest_received(received(to="nobody@rtcrackers.com"))
-    assert r["ours"] is True and r["new"] == 1 and r["catch_all"] is True
-    [row] = service.list_messages(ADMIN, "admin", "inbox")
-    assert row["from_address"] == "jane@example.com"
+    conn_counter["n"] = 0
+    for _ in range(5):
+        service.list_mailboxes(ADMIN)
+    assert conn_counter["n"] == 1                       # one query served five calls
+    service.clear_caches()
+    service.list_mailboxes(ADMIN)
+    assert conn_counter["n"] == 2
+
+
+def test_cached_mailbox_rows_are_copies_and_still_filtered_per_user(db, caches_on):
+    service.ensure_mailboxes()
+    rows = service.list_mailboxes(ADMIN)
+    rows[0]["label"] = "tampered"; rows.pop()
+    again = service.list_mailboxes(ADMIN)
+    assert again[0]["label"] != "tampered" and len(again) == 10     # callers cannot poison the cache
+    sales = next(b["mailbox_id"] for b in again if b["local_part"] == "sales")
+    assert [b["local_part"] for b in service.list_mailboxes(User("u", "u@x", False, {sales}))] == ["sales"]
+
+
+def test_ensure_mailboxes_runs_once_per_interval_unless_forced(db, caches_on, conn_counter):
+    service.ensure_mailboxes()
+    conn_counter["n"] = 0
+    service.ensure_mailboxes(); service.ensure_mailboxes()
+    assert conn_counter["n"] == 0
+    service.ensure_mailboxes(force=True)
+    assert conn_counter["n"] == 1
+
+
+def test_bootstrap_returns_everything_in_one_connection(db, caches_on, conn_counter, fake_resend):
+    service.ensure_mailboxes()
+    service.ingest_received(received())
+    service.save_draft(ADMIN, "sales", "a@example.com", "", "", "wip", "x")
+    service.list_mailboxes(ADMIN)                       # warm
+    conn_counter["n"] = 0
+    data = service.bootstrap(ADMIN, "sales", "inbox")
+    assert conn_counter["n"] == 1
+    assert data["mailbox"] == "sales" and [r["subject"] for r in data["items"]] == ["Hello"]
+    assert data["counts"] == {"sales": 1} and data["drafts"] == {"sales": 1}
+    assert data["latest"]["sales"] == data["items"][0]["id"]
+    assert len(data["boxes"]) == 10
+
+
+def test_bootstrap_falls_back_to_first_mailbox_and_respects_permissions(db, fake_resend):
+    service.ensure_mailboxes()
+    assert service.bootstrap(ADMIN, "does-not-exist")["mailbox"] == "admin"
+    support = next(b["mailbox_id"] for b in service.list_mailboxes(ADMIN) if b["local_part"] == "support")
+    data = service.bootstrap(User("u", "u@x", False, {support}), "sales")
+    assert [b["local_part"] for b in data["boxes"]] == ["support"] and data["mailbox"] == "support"
+    nobody = service.bootstrap(User("n", "n@x", False, set()))
+    assert nobody["boxes"] == [] and nobody["items"] == [] and nobody["mailbox"] == ""
+
+
+def test_pulse_reports_unread_counts_latest_id_and_drafts(db, fake_resend):
+    service.ensure_mailboxes()
+    assert service.pulse(ADMIN) == {"counts": {}, "latest": {}, "drafts": {}}
+    service.ingest_received(received("r1")); service.ingest_received(received("r2"))
+    newest = max(r["id"] for r in service.list_messages(ADMIN, "sales", "inbox"))
+    p = service.pulse(ADMIN)
+    assert p["counts"] == {"sales": 2} and p["latest"] == {"sales": newest}
+    service.update_messages(ADMIN, [r["id"] for r in service.list_messages(ADMIN, "sales", "inbox")], "read")
+    p = service.pulse(ADMIN)
+    assert p["counts"] == {} and p["latest"] == {"sales": newest}          # read mail still counts as "latest"
+    service.update_messages(ADMIN, [newest], "trash")
+    assert service.pulse(ADMIN)["latest"]["sales"] < newest                 # trashed mail no longer counts
+
+
+def test_sync_cost_does_not_grow_with_the_number_of_stored_emails(db, caches_on, conn_counter, monkeypatch, fake_resend):
+    service.ensure_mailboxes()
+    ids = [f"m{i}" for i in range(40)]
+    for rid in ids:
+        service.ingest_received({"id": rid, "to": ["sales@rtcrackers.com"]})
+    cost = {}
+    for count in (5, 40):
+        items = [{"id": r, "to": ["sales@rtcrackers.com"]} for r in ids[:count]]
+        monkeypatch.setattr(resend_client, "list_received", lambda limit=100, after=None, items=items: {"data": items, "has_more": False})
+        service.clear_caches(); conn_counter["n"] = 0
+        assert service.sync_inbox() == {"new": 0, "failed": 0, "partial": False}
+        cost[count] = conn_counter["n"]
+    assert cost[5] == cost[40] <= 3             # before: one connection PER email (over 100 for a full page)
+    assert fake_resend.fetched.count("m0") == 1  # and nothing was downloaded again
+
+
+def test_known_lookup_understands_multi_mailbox_ids(db, fake_resend):
+    service.ensure_mailboxes()
+    service.ingest_received({"id": "multi", "to": ["sales@rtcrackers.com"], "cc": ["support@rtcrackers.com"]})
+    service.ingest_received({"id": "single", "to": ["info@rtcrackers.com"]})
+    known = service._load_known(["multi", "single", "never-seen", ""])
+    assert len(known["multi"][0]) == 2 and known["multi"][1] is True
+    assert len(known["single"][0]) == 1 and "never-seen" not in known
+    assert service._load_known([]) == {}
+
+
+def test_get_message_returns_to_cc_and_bcc_separately(db, fake_resend):
+    service.ensure_mailboxes()
+    mid = service.send_mail(ADMIN, "sales", "to1@example.com, to2@example.com", "cc1@example.com", "bcc1@example.com", "s", "b")
+    msg = service.get_message(ADMIN, mid)
+    assert msg["to_addrs"] == ["to1@example.com", "to2@example.com"]
+    assert msg["cc_addrs"] == ["cc1@example.com"] and msg["bcc_addrs"] == ["bcc1@example.com"]

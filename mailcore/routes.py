@@ -6,7 +6,6 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
-from svix.webhooks import Webhook, WebhookVerificationError
 
 from . import auth, config, resend_client, service
 from .db import conn
@@ -16,7 +15,8 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 _WEBHOOK_HEADERS = {"svix-id", "svix-timestamp", "svix-signature"}
-_PUBLIC_CACHE = "public, max-age=300, stale-while-revalidate=3600"
+_PUBLIC_CACHE = "public, max-age=300, s-maxage=600, stale-while-revalidate=3600"
+FOLDERS = ("inbox", "sent", "drafts", "starred", "trash")
 
 
 class SendIn(BaseModel):
@@ -65,46 +65,6 @@ def health():
     return {"ok": True}
 
 
-@router.get("/diagnose")
-def diagnose(response: Response):
-    """Open https://<your-mail-domain>/api/diagnose when the site fails in the browser. Shows which settings the
-    server can see (yes/no only, never the values) and whether the database answers."""
-    import os
-    from urllib.parse import urlsplit
-
-    response.headers["Cache-Control"] = "no-store"
-    settings = {
-        "DATABASE_URL": bool(config.DATABASE_URL),
-        "SUPABASE_URL": bool(config.SUPABASE_URL),
-        "SUPABASE_ANON_KEY": bool(config.SUPABASE_ANON_KEY),
-        "RESEND_API_KEY": bool(config.RESEND_API_KEY),
-        "RESEND_WEBHOOK_SECRET": bool(config.RESEND_WEBHOOK_SECRET),
-    }
-    database, hint = "not configured", ""
-    if config.DATABASE_URL:
-        try:
-            with conn() as c:
-                c.execute("select 1")
-            database = "connected"
-        except Exception as exc:  # report the kind of failure, never the connection string
-            database = "failed: " + type(exc).__name__
-            host = urlsplit("//" + config.DATABASE_URL.rsplit("@", 1)[-1].split("://")[-1]).hostname or ""
-            if host.startswith("db.") and host.endswith(".supabase.co"):
-                hint = ("DATABASE_URL uses the direct 'db.<project>.supabase.co' address, which many hosts (including Vercel) cannot reach. "
-                        "Use the pooler address from Supabase > Connect > Transaction pooler (aws-0-...pooler.supabase.com:6543).")
-            else:
-                hint = "Check the user, password (URL-encode special characters) and that the project is not paused."
-    missing = [k for k, ok in settings.items() if not ok]
-    return {
-        "ok": not missing and database == "connected",
-        "settings_present": settings,
-        "database": database,
-        "hint": hint or (("Add the missing settings in your host's environment variables, then redeploy: " + ", ".join(missing)) if missing else ""),
-        "running_on_vercel": bool(os.getenv("VERCEL")),
-        "dev_no_auth_active": config.DEV_NO_AUTH,
-    }
-
-
 @router.post("/auth/login")
 def login(body: LoginIn, response: Response):
     response.headers["Cache-Control"] = "no-store"
@@ -151,6 +111,38 @@ def get_company(response: Response):
     return row or {}
 
 
+@router.get("/branding")
+def get_branding(response: Response):
+    """Theme and company in one request (one DB connection). Falls back to defaults if the tables are unavailable."""
+    empty = {"theme": {"components": []}, "company": {}}
+    try:
+        with conn() as c:
+            try:
+                row = c.execute(
+                    "select * from public.theme_page_settings where website_key='mail' and page_key='inbox' and is_active=true limit 1"
+                ).fetchone()
+                components = c.execute(
+                    "select * from public.theme_component_settings where website_key='mail' and page_key='inbox' and is_active=true order by sort_order"
+                ).fetchall()
+            except psycopg.Error:
+                c.rollback()
+                log.warning("Theme settings unavailable; using defaults", exc_info=True)
+                row, components = None, []
+            try:
+                company = c.execute(
+                    "select company_name, logo_url from public.company_profile where is_active=true order by updated_at desc limit 1"
+                ).fetchone()
+            except psycopg.Error:
+                c.rollback()
+                log.warning("Company profile unavailable; using defaults", exc_info=True)
+                company = None
+    except (psycopg.Error, RuntimeError):
+        log.warning("Branding unavailable; using built-in defaults", exc_info=True)
+        return empty
+    response.headers["Cache-Control"] = _PUBLIC_CACHE
+    return {"theme": {**(row or {}), "components": components}, "company": company or {}}
+
+
 @router.get("/config")
 def get_config(response: Response, user: auth.User = Depends(auth.current_user)):
     response.headers["Cache-Control"] = "no-store"
@@ -159,13 +151,50 @@ def get_config(response: Response, user: auth.User = Depends(auth.current_user))
     return {
         "domain": config.MAIL_DOMAIN,
         "user": user.email,
-        "is_admin": user.is_admin,
         "mailboxes": [
             {"id": b["local_part"], "label": b["label"], "address": b["address"], "can_send": b["is_sending_enabled"]}
             for b in boxes
         ],
         "resend_configured": bool(config.RESEND_API_KEY),
+        "webhook_configured": bool(config.RESEND_WEBHOOK_SECRET),
     }
+
+
+@router.get("/bootstrap")
+def bootstrap(
+    response: Response,
+    mailbox: str = Query("", max_length=64),
+    folder: str = "inbox",
+    user: auth.User = Depends(auth.current_user),
+):
+    """Everything the first screen needs in ONE request: mailboxes, unread/draft counts, first page of a folder."""
+    response.headers["Cache-Control"] = "no-store"
+    if folder not in FOLDERS:
+        raise HTTPException(400, "Unknown folder")
+    data = service.bootstrap(user, mailbox or None, folder, limit=50)
+    return {
+        "domain": config.MAIL_DOMAIN,
+        "user": user.email,
+        "mailboxes": [
+            {"id": b["local_part"], "label": b["label"], "address": b["address"], "can_send": b["is_sending_enabled"]}
+            for b in data["boxes"]
+        ],
+        "resend_configured": bool(config.RESEND_API_KEY),
+        "webhook_configured": bool(config.RESEND_WEBHOOK_SECRET),
+        "mailbox": data["mailbox"],
+        "folder": folder,
+        "counts": data["counts"],
+        "drafts": data["drafts"],
+        "latest": data["latest"],
+        "items": data["items"],
+    }
+
+
+@router.get("/pulse")
+def pulse(response: Response, user: auth.User = Depends(auth.current_user)):
+    """Cheap 'anything new?' check: unread counts, draft counts and the newest inbox id per mailbox (one query)."""
+    response.headers["Cache-Control"] = "no-store"
+    return service.pulse(user)
 
 
 @router.get("/counts")
@@ -191,7 +220,7 @@ def list_messages(
     user: auth.User = Depends(auth.current_user),
 ):
     response.headers["Cache-Control"] = "no-store"
-    if folder not in ("inbox", "sent", "drafts", "starred", "trash"):
+    if folder not in FOLDERS:
         raise HTTPException(400, "Unknown folder")
     try:
         return service.list_messages(user, mailbox, folder, q, limit, offset)
@@ -271,47 +300,18 @@ def sync(response: Response, full: bool = False, user: auth.User = Depends(auth.
         raise _resend_http_error(exc)
 
 
-def admin_only(user: auth.User = Depends(auth.current_user)) -> auth.User:
-    if not user.is_admin:
-        raise HTTPException(403, "Administrators only")
-    return user
-
-
-@router.get("/compliance")
-def compliance_report(response: Response, refresh: bool = False, user: auth.User = Depends(admin_only)):
-    """Is company mail held only here? DNS look-up + application guarantees."""
-    response.headers["Cache-Control"] = "no-store"
-    return service.compliance_report(force=refresh)
-
-
-@router.get("/archive")
-def archive_list(
-    response: Response,
-    q: str = Query("", max_length=200),
-    mailbox: str = Query("", max_length=64),
-    limit: int = Query(50, ge=1, le=service.MAX_PAGE),
-    offset: int = Query(0, ge=0, le=100_000),
-    user: auth.User = Depends(admin_only),
-):
-    response.headers["Cache-Control"] = "no-store"
-    return service.archive_search(q, mailbox, limit, offset)
-
-
-@router.get("/archive/{archive_id}")
-def archive_item(archive_id: int, response: Response, user: auth.User = Depends(admin_only)):
-    response.headers["Cache-Control"] = "no-store"
-    item = service.archive_get(archive_id)
-    if not item:
-        raise HTTPException(404, "Archived message not found")
-    return item
-
-
 @router.post("/webhooks/resend")
 async def resend_webhook(request: Request):
     if not config.RESEND_WEBHOOK_SECRET:
         raise HTTPException(503, "Webhook disabled: set RESEND_WEBHOOK_SECRET")
     raw = await request.body()
     headers = {k: v for k, v in request.headers.items() if k.lower() in _WEBHOOK_HEADERS}
+    try:
+        # Imported here, not at module level, so a problem with this library can never stop the whole app starting.
+        from svix.webhooks import Webhook, WebhookVerificationError
+    except ImportError:
+        log.exception("The svix package could not be imported")
+        raise HTTPException(503, "Webhook verification is unavailable")
     try:
         Webhook(config.RESEND_WEBHOOK_SECRET).verify(raw, headers)
     except WebhookVerificationError:
