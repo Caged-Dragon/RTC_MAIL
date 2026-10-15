@@ -69,7 +69,7 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 ## Deploy on Vercel
 
 1. Push this folder to a GitHub repo and import it in Vercel (Framework: Other/FastAPI; no build command).
-2. Add the variables from `.env.example` (see `ENVIRONMENT.md`).
+2. Add the variables from `.env.example` (see `ENVIRONMENT.md`). `SUPABASE_URL` is prefilled for project `ybvsjuyznkdwvrnjnelr`; you must still supply that project’s own `DATABASE_URL` and `SUPABASE_ANON_KEY` from its dashboard.
 3. Deploy, open the site, and sign in with the Supabase Auth user `admin@rtcrackers.com`.
 4. Use **Import older mail** once for the first import.
 5. In Resend, point the webhook at `https://<your-domain>/api/webhooks/resend`, enable **email.received** plus the delivery events (**email.delivered, email.bounced, email.complained, email.failed**), and set `RESEND_WEBHOOK_SECRET`.
@@ -104,8 +104,12 @@ For local work without Supabase Auth set `MAIL_DEV_NO_AUTH=1` in `.env`.
 
 Open `https://<your-domain>/api/health`:
 
-- `{"ok":true}` - the app is running. If something else fails, the browser's Network tab shows a readable `detail` message (for example *SUPABASE_URL and SUPABASE_ANON_KEY are not configured* or *Database temporarily unavailable*).
-- `{"ok":false,"startup_error":"..."}` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
+- `{"ok":true}` - the app process is running. This liveness route does not verify credentials or database access.
+
+Then open `https://<your-domain>/api/health/ready` after configuring the environment. It checks database connectivity, the six existing mail tables, and whether Supabase Auth, Resend sending, and Resend webhook verification are configured. It returns booleans only and never shows secrets. It returns HTTP 503 until every required check passes.
+
+- On `/api/health/ready`, `{"ok":true,"checks":{...}}` with HTTP 200 means the database and all required provider configuration checks passed; HTTP 503 means at least one check is false.
+- `{"ok":false,"startup_error":"..."}` on `/api/health` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
 - A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
 
 Dependencies are declared in **both** `requirements.txt` and `pyproject.toml` (a unit test keeps them identical), because hosts such as Vercel may install from either. If a deploy fails at startup with `No module named 'fastapi'`, the install step did not run - check the build log.

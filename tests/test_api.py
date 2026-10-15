@@ -8,7 +8,7 @@ import httpx
 import pytest
 from svix.webhooks import Webhook
 
-from mailcore import auth, config, resend_client, service
+from mailcore import auth, config, resend_client, routes, service
 
 SECRET = "whsec_" + base64.b64encode(b"super-secret-key-for-tests").decode()
 
@@ -22,6 +22,58 @@ def signed_headers(payload: bytes, secret: str = SECRET) -> dict:
 def test_app_constructs_and_health(client):
     r = client.get("/api/health")
     assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_readiness_checks_database_and_configuration_without_leaking_secrets(client, monkeypatch):
+    class FakeCursor:
+        def __init__(self, result):
+            self.result = result
+
+        def fetchone(self):
+            return self.result
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        @staticmethod
+        def execute(sql):
+            if sql == "select 1":
+                return FakeCursor((1,))
+            assert "to_regclass('public.business_email_addresses')" in sql
+            return FakeCursor({
+                "business_email_purposes": True,
+                "business_email_addresses": True,
+                "mailboxes": True,
+                "mailbox_access": True,
+                "email_messages": True,
+                "email_recipients": True,
+            })
+
+    monkeypatch.setattr(routes, "conn", lambda: FakeConnection())
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://ybvsjuyznkdwvrnjnelr.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_ANON_KEY", "test-anon-secret")
+    monkeypatch.setattr(config, "RESEND_API_KEY", "test-resend-secret")
+    monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "test-webhook-secret")
+
+    response = client.get("/api/health/ready")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "checks": {
+            "database": True,
+            "mail_schema": True,
+            "supabase_auth_configured": True,
+            "resend_sending_configured": True,
+            "resend_webhook_configured": True,
+        },
+    }
+    assert "test-anon-secret" not in response.text
+    assert "test-resend-secret" not in response.text
+    assert "test-webhook-secret" not in response.text
 
 
 def test_security_headers_present_on_api_and_static(client):

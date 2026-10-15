@@ -1,5 +1,29 @@
 # Custom-domain mailbox setup and verification
 
+# Connect this website to your supplied Supabase project
+
+The supplied project ID is `ybvsjuyznkdwvrnjnelr`, so the project's API URL is configured as `https://ybvsjuyznkdwvrnjnelr.supabase.co`. The project ID is not a credential and does not provide database access by itself. The `.env.local` in the originally uploaded archive referenced a different Supabase project; do not copy that old project's database password or API key into this deployment.
+
+Before deploying, obtain the credentials directly from the Supabase dashboard for project `ybvsjuyznkdwvrnjnelr`. First, run this read-only check in that project's SQL Editor to see whether the required mail tables already exist:
+
+```sql
+select
+  to_regclass('public.business_email_purposes') as business_email_purposes,
+  to_regclass('public.business_email_addresses') as business_email_addresses,
+  to_regclass('public.mailboxes') as mailboxes,
+  to_regclass('public.mailbox_access') as mailbox_access,
+  to_regclass('public.email_messages') as email_messages,
+  to_regclass('public.email_recipients') as email_recipients;
+```
+
+If any result is `NULL`, do not assume the full existing mail schema has been migrated to this project. Review the actual schema and apply only the missing, reviewed SQL; do not reset tables or run destructive archive scripts just to connect the app. In particular, `supabase/mail_exclusive_archive.sql` is documented as having been applied to the old project `ypmiinmkyvzdpakbkers`; it has not been verified for the supplied target project and changes archive triggers/RLS policies, including `customer_addresses` policies. Do not run it in the target project without a separate schema/security review.
+
+1. In **Project Settings → Database → Connection string**, select the pooler connection string recommended for your hosting platform and copy its URI into the server-side `DATABASE_URL` environment variable. It must point to this same project. Replace any password placeholder locally in your hosting dashboard; do not paste the connection string into this chat or commit it to Git.
+2. In **Project Settings → API** (or the project's API keys panel), copy the publishable/anon key into `SUPABASE_ANON_KEY`. Keep `SUPABASE_URL` set to `https://ybvsjuyznkdwvrnjnelr.supabase.co`. The app uses these for Supabase Auth; `DATABASE_URL` is the separate server-side Postgres connection.
+3. In the hosting dashboard, add `MAIL_DOMAIN=rtcrackers.com`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `MAIL_ADMIN_EMAIL`. Keep all keys server-side. Redeploy after saving environment variables.
+4. Open `https://<your-site>/api/health/ready`. Do not proceed until it returns `ok: true` and all checks are `true`. If `database` is false, verify the database URI belongs to project `ybvsjuyznkdwvrnjnelr`, the password is current, and the correct pooler/region was selected. If `supabase_auth_configured` is false, check the Auth URL and key. If a Resend check is false, set the corresponding Resend environment variable.
+5. In the target project's SQL Editor, run the read-only mailbox queries in this guide first. Only run `supabase/mail_portal_setup.sql` if its tables/types do not already exist or are incomplete. Review SQL before execution; do not reset or drop existing mail tables.
+
 This app uses the existing Supabase tables `business_email_addresses`, `mailboxes`, `email_messages`, and `email_recipients`. It does not use a frontend-only list to decide which addresses can receive mail.
 
 ## 1. Check the real configured addresses

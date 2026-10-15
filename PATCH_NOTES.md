@@ -27,6 +27,13 @@
 
 ## Validation performed here
 
-- Python compilation check: passed.
-- Pure-function/config/compliance tests: 44 passed.
-- Database-backed mailbox/webhook tests were not run because this environment has no PostgreSQL test database, no `psycopg` installation, and no network access to install dependencies. No live Resend or DNS test was possible from this environment.
+- Python compilation passed for the updated backend modules and API test file.
+- The full pytest suite could not be collected in this environment because Python dependencies `svix` and `psycopg` are not installed; there was no network access available to install them. No claim is made that the updated full suite passed.
+- Database-backed mailbox/webhook tests and live Resend/DNS delivery were not run from this environment.
+
+## Supabase project connection update
+
+- Set the documented/default Supabase Auth URL to `https://ybvsjuyznkdwvrnjnelr.supabase.co`, based on the project ID supplied by the user. The project ID and URL have not been authenticated against a live dashboard.
+- Added `/api/health/ready`, which checks a real Postgres connection, the six required mail tables, and whether Auth/Resend environment variables are present; it returns only booleans and no secrets.
+- Marked `supabase/mail_exclusive_archive.sql` as historical project-specific SQL because its header identifies the old project; it must not be run against the target blindly.
+- Direct connection to the live database is not verified: a project ID alone does not provide the database password/connection string or Auth key. The actual project credentials must be set in the hosting environment by the owner.

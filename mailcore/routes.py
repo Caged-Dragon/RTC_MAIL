@@ -65,6 +65,40 @@ def health():
     return {"ok": True}
 
 
+@router.get("/health/ready")
+def readiness(response: Response):
+    """Readiness probe for deployment setup. Reports booleans only, never secret values."""
+    checks = {
+        "database": False,
+        "mail_schema": False,
+        "supabase_auth_configured": bool(config.SUPABASE_URL and config.SUPABASE_ANON_KEY),
+        "resend_sending_configured": bool(config.RESEND_API_KEY),
+        "resend_webhook_configured": bool(config.RESEND_WEBHOOK_SECRET),
+    }
+    try:
+        with conn() as database:
+            database.execute("select 1").fetchone()
+            checks["database"] = True
+            schema = database.execute("""
+                select
+                  to_regclass('public.business_email_purposes') is not null as business_email_purposes,
+                  to_regclass('public.business_email_addresses') is not null as business_email_addresses,
+                  to_regclass('public.mailboxes') is not null as mailboxes,
+                  to_regclass('public.mailbox_access') is not null as mailbox_access,
+                  to_regclass('public.email_messages') is not null as email_messages,
+                  to_regclass('public.email_recipients') is not null as email_recipients
+            """).fetchone()
+            checks["mail_schema"] = bool(schema) and all(bool(value) for value in schema.values())
+    except (psycopg.Error, RuntimeError):
+        # Keep provider/host/password details out of the public HTTP response.
+        log.warning("Readiness check could not connect to the configured database or inspect the mail schema")
+
+    ready = all(checks.values())
+    response.status_code = 200 if ready else 503
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": ready, "checks": checks}
+
+
 @router.post("/auth/login")
 def login(body: LoginIn, response: Response):
     response.headers["Cache-Control"] = "no-store"
