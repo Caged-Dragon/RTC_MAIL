@@ -384,3 +384,9 @@ class TestSpeedEndpoints:
         monkeypatch.setattr(config, "DATABASE_URL", "")
         r = client.get("/api/bootstrap")
         assert r.status_code == 503 and "detail" in r.json()
+
+
+def test_page_declares_an_icon_so_browsers_do_not_request_a_missing_favicon(client):
+    html = client.get("/").text
+    assert 'rel="icon"' in html
+    assert html.index('rel="icon"') < html.index("</head>")
