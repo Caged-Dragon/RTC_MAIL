@@ -30,3 +30,7 @@ In Vercel:
 - Static frontend assets remain served from `public/`; keep their URLs stable for normal deploys and avoid routing asset requests through additional application/API fetches.
 
 The app code can be prepared and committed from Git, but deployment still needs to be triggered by the connected Vercel project after the commit exists in the repository branch it builds.
+
+### Transaction pooler URL note
+
+If `database` and `mail_schema` are true but `database_project_matches` is false while using Supabase's transaction pooler, confirm the pooler username is `postgres.<project-ref>`. The readiness check in the latest package normalizes the URL before parsing it. The database connector already did this for the connection itself, but the readiness route previously parsed the raw value directly. A `#` in a password could be treated as a URL fragment marker, yielding `database: true` and `mail_schema: true` but `database_project_matches: false`. Passwords containing reserved characters should still be percent-encoded (for example, `#` as `%23`) in Vercel `DATABASE_URL`. Keep the database password private and rotate it if it was exposed.

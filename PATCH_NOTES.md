@@ -46,3 +46,10 @@
 - Added a cold-cache performance regression test asserting bootstrap uses one connection.
 - Updated the setup guide to reflect that the live project's mail tables and mail-archive hardening migrations were inspected; no migration is required for the existing schema.
 
+
+
+## Readiness check fix for transaction-pooler URLs
+
+- Fixed `database_project_matches` to normalize `DATABASE_URL` before `urlsplit()` parses it. An unescaped `#` in a password is treated by URL parsers as a fragment marker; the database connector already normalized the URL for the actual connection, which is why `database` and `mail_schema` could be true while the project check stayed false.
+- Added a regression case using a transaction-pooler URL whose password contains `#`, without connecting to a real database or exposing credentials.
+- Passwords in `DATABASE_URL` should still be URL-encoded; for example, encode `#` as `%23`. If the password was exposed in chat, reset it first and use the new password only in Vercel.

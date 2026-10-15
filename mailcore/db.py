@@ -8,7 +8,7 @@ from . import config
 
 
 def _normalize_database_url(value: str) -> str:
-    """Normalize PostgreSQL URLs whose password contains unescaped '@' characters."""
+    """Normalize PostgreSQL URLs whose password contains unescaped reserved characters such as '@' or '#'."""
     value = (value or "").strip()
     if not value:
         return value

@@ -9,7 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from . import auth, config, resend_client, service
-from .db import conn
+from .db import _normalize_database_url, conn
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,9 @@ def readiness(response: Response):
     expected_ref = config.SUPABASE_PROJECT_REF.lower()
     try:
         auth_host = (urlsplit(config.SUPABASE_URL).hostname or "").lower()
-        db_url = urlsplit(config.DATABASE_URL)
+        # Normalize first: DATABASE_URL passwords can contain reserved characters like #.
+        # urlsplit() otherwise treats an unescaped # as a fragment and misreads the host/user.
+        db_url = urlsplit(_normalize_database_url(config.DATABASE_URL))
         db_host = (db_url.hostname or "").lower()
         db_user = (db_url.username or "").lower()
     except ValueError:

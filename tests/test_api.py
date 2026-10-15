@@ -56,7 +56,8 @@ def test_readiness_checks_database_and_configuration_without_leaking_secrets(cli
     monkeypatch.setattr(routes, "conn", lambda: FakeConnection())
     monkeypatch.setattr(config, "SUPABASE_PROJECT_REF", "ypmiinmkyvzdpakbkers")
     monkeypatch.setattr(config, "SUPABASE_URL", "https://ypmiinmkyvzdpakbkers.supabase.co")
-    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://postgres.ypmiinmkyvzdpakbkers:test@aws-0-ap-south-1.pooler.supabase.com:6543/postgres")
+    # A raw # in the password used to be parsed as a URL fragment by the readiness check.
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://postgres.ypmiinmkyvzdpakbkers:test#part2@aws-0-ap-south-1.pooler.supabase.com:6543/postgres")
     monkeypatch.setattr(config, "SUPABASE_ANON_KEY", "test-anon-secret")
     monkeypatch.setattr(config, "RESEND_API_KEY", "test-resend-secret")
     monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "test-webhook-secret")
