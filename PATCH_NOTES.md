@@ -33,7 +33,16 @@
 
 ## Supabase project connection update
 
-- Set the documented/default Supabase Auth URL to `https://ybvsjuyznkdwvrnjnelr.supabase.co`, based on the project ID supplied by the user. The project ID and URL have not been authenticated against a live dashboard.
+- Corrected the Supabase project mapping after inspecting the connected database: `ybvsjuyznkdwvrnjnelr` is the organization ID; the actual project is RtCrackers Cart, ref `ypmiinmkyvzdpakbkers`. Updated default Auth URL and readiness checks to validate that Auth/database configuration points to the right project.
 - Added `/api/health/ready`, which checks a real Postgres connection, the six required mail tables, and whether Auth/Resend environment variables are present; it returns only booleans and no secrets.
 - Marked `supabase/mail_exclusive_archive.sql` as historical project-specific SQL because its header identifies the old project; it must not be run against the target blindly.
 - Direct connection to the live database is not verified: a project ID alone does not provide the database password/connection string or Auth key. The actual project credentials must be set in the hosting environment by the owner.
+
+## Page-load performance and live-project alignment
+
+- Confirmed the Supabase organization ID (`ybvsjuyznkdwvrnjnelr`) differs from the connected project ref (`ypmiinmkyvzdpakbkers`). Corrected the sample `SUPABASE_URL` to the actual project API URL. Use the matching project's `DATABASE_URL` and publishable/anon key in Vercel.
+- Changed cold-start `/api/bootstrap` to reuse a single database connection for periodic mailbox reconciliation, mailbox discovery, counts, draft badges, and the first page of messages. Previously, a cold cache could open up to three connections.
+- Combined unread counts, latest inbox message IDs, and draft counts into one aggregate query (instead of two queries) for bootstrap and lightweight `/api/pulse` polling.
+- Added a cold-cache performance regression test asserting bootstrap uses one connection.
+- Updated the setup guide to reflect that the live project's mail tables and mail-archive hardening migrations were inspected; no migration is required for the existing schema.
+

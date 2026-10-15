@@ -517,6 +517,14 @@ def test_ensure_mailboxes_runs_once_per_interval_unless_forced(db, caches_on, co
     assert conn_counter["n"] == 1
 
 
+def test_cold_bootstrap_uses_one_connection_for_mailboxes_and_first_page(db, caches_on, conn_counter, fake_resend):
+    # No prior request has warmed the mailbox cache or periodic ensure check.
+    data = service.bootstrap(ADMIN, "sales", "inbox")
+    assert conn_counter["n"] == 1
+    assert len(data["boxes"]) == 10
+    assert data["mailbox"] == "sales"
+
+
 def test_bootstrap_returns_everything_in_one_connection(db, caches_on, conn_counter, fake_resend):
     service.ensure_mailboxes()
     service.ingest_received(received())

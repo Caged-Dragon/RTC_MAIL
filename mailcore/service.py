@@ -67,53 +67,72 @@ def clear_caches() -> None:
         _ensure_state["at"] = None
 
 
-def ensure_mailboxes(force: bool = False) -> None:
-    """Create mailbox rows for business addresses that do not have one yet (at most every ENSURE_TTL seconds)."""
+def _insert_missing_mailboxes(c) -> None:
+    """Ensure each active address on MAIL_DOMAIN has a mailbox row, on an existing connection."""
+    c.execute(
+        """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
+           select b.business_email_id,
+                  coalesce((select min(business_id) from mailboxes), 1),
+                  lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
+                  case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
+                       when 'support' then 'support' when 'billing' then 'billing'
+                       when 'orders' then 'operations' else 'general' end::mailbox_type
+           from business_email_addresses b
+           join business_email_purposes p using (email_purpose_id)
+           where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
+             and not exists (select 1 from mailboxes m where m.business_email_id = b.business_email_id)
+             and not exists (select 1 from mailboxes m where m.email_address = lower(b.email_address))
+           on conflict do nothing""",
+        (config.MAIL_DOMAIN,),
+    )
+
+
+def ensure_mailboxes(force: bool = False, c=None) -> None:
+    """Create missing mailbox rows periodically; reuse an existing connection when one is available."""
     now = time.monotonic()
     with _cache_lock:
         last = _ensure_state["at"]
     if not force and last is not None and now - last < ENSURE_TTL:
         return
-    with conn() as c:
-        c.execute(
-            """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
-               select b.business_email_id,
-                      coalesce((select min(business_id) from mailboxes), 1),
-                      lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
-                      case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
-                           when 'support' then 'support' when 'billing' then 'billing'
-                           when 'orders' then 'operations' else 'general' end::mailbox_type
-               from business_email_addresses b
-               join business_email_purposes p using (email_purpose_id)
-               where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
-                 and not exists (select 1 from mailboxes m where m.business_email_id = b.business_email_id)
-                 and not exists (select 1 from mailboxes m where m.email_address = lower(b.email_address))
-               on conflict do nothing""",
-            (config.MAIL_DOMAIN,),
-        )
+
+    if c is None:
+        with conn() as database:
+            _insert_missing_mailboxes(database)
+    else:
+        _insert_missing_mailboxes(c)
+
     with _cache_lock:
         _ensure_state["at"] = now
-        _mb_cache["rows"] = None   # new rows may exist now
+        # We may have inserted mailboxes, so do not serve a possibly stale mailbox cache.
+        _mb_cache.update(at=0.0, rows=None)
 
 
-def _fetch_mailboxes() -> list[dict]:
-    with conn() as c:
-        rows = c.execute(
-            """select distinct on (m.email_address)
+def _fetch_mailboxes(c=None) -> list[dict]:
+    """Fetch the active domain mailboxes on a supplied connection or a short-lived connection."""
+    sql = """select distinct on (m.email_address)
                       m.mailbox_id, m.local_part, m.email_address as address,
                       coalesce(nullif(m.display_name, ''), b.display_name, m.local_part) as label,
                       m.is_receiving_enabled, m.is_sending_enabled
                from mailboxes m
                join business_email_addresses b on b.business_email_id = m.business_email_id and b.is_active
                where m.is_active and lower(split_part(m.email_address, '@', 2)) = %s
-               order by m.email_address, m.mailbox_id""",
-            (config.MAIL_DOMAIN,),
-        ).fetchall()
+               order by m.email_address, m.mailbox_id"""
+    if c is None:
+        with conn() as database:
+            rows = database.execute(sql, (config.MAIL_DOMAIN,)).fetchall()
+    else:
+        rows = c.execute(sql, (config.MAIL_DOMAIN,)).fetchall()
     # Known local-parts may be placed first for continuity, but this is only a sort preference.
     # Addresses outside MAILBOX_ORDER are still returned and routed normally.
     priority = {local: i for i, local in enumerate(config.MAILBOX_ORDER)}
     rows.sort(key=lambda r: (priority.get(r["local_part"], len(priority)), r["local_part"]))
     return rows
+
+
+def _visible_mailboxes(rows: list[dict], user=None) -> list[dict]:
+    if user is not None and not user.is_admin:
+        rows = [r for r in rows if r["mailbox_id"] in user.mailbox_ids]
+    return [dict(r) for r in rows]
 
 
 def list_mailboxes(user=None) -> list[dict]:
@@ -124,9 +143,7 @@ def list_mailboxes(user=None) -> list[dict]:
         rows = _fetch_mailboxes()
         with _cache_lock:
             _mb_cache.update(at=now, rows=rows)
-    if user is not None and not user.is_admin:
-        rows = [r for r in rows if r["mailbox_id"] in user.mailbox_ids]
-    return [dict(r) for r in rows]
+    return _visible_mailboxes(rows, user)
 
 
 def _box_by_local(local: str, user, sending=False) -> dict:
@@ -695,18 +712,24 @@ def apply_delivery_event(event_type: str, resend_email_id: str | None, event_id:
 # --- Fast first screen and cheap "anything new?" checks ------------------------------------------------
 
 def _pulse(c, ids: list[int]) -> dict:
-    """Unread counts, draft counts and the newest inbox message id per mailbox, on an existing connection."""
+    """Unread counts, draft counts and latest inbox ids in one query on an existing connection."""
+    if not ids:
+        return {"counts": {}, "latest": {}, "drafts": {}}
     rows = c.execute(
-        """select mb.local_part, count(*) filter (where not m.is_read) as unread, max(m.email_message_id) as latest
-           from email_messages m join mailboxes mb using (mailbox_id)
-           where m.folder = 'inbox' and m.deleted_at is null and m.mailbox_id = any(%s)
+        """select mb.local_part,
+                  count(*) filter (where m.folder = 'inbox' and m.deleted_at is null and not m.is_read) as unread,
+                  max(m.email_message_id) filter (where m.folder = 'inbox' and m.deleted_at is null) as latest,
+                  count(*) filter (where m.folder = 'drafts' and m.deleted_at is null) as drafts
+           from mailboxes mb
+           left join email_messages m on m.mailbox_id = mb.mailbox_id
+           where mb.mailbox_id = any(%s)
            group by mb.local_part""",
         (ids,),
     ).fetchall()
     return {
         "counts": {r["local_part"]: r["unread"] for r in rows if r["unread"]},
-        "latest": {r["local_part"]: r["latest"] for r in rows},
-        "drafts": _draft_counts(c, ids),
+        "latest": {r["local_part"]: r["latest"] for r in rows if r["latest"] is not None},
+        "drafts": {r["local_part"]: r["drafts"] for r in rows if r["drafts"]},
     }
 
 
@@ -717,12 +740,21 @@ def pulse(user) -> dict:
 
 
 def bootstrap(user, local: str | None = None, folder: str = "inbox", limit: int = 50) -> dict:
-    """Everything the first screen needs, in one connection: mailboxes, counts, and the first page of a folder."""
-    ensure_mailboxes()
-    boxes = list_mailboxes(user)
-    chosen = next((b for b in boxes if b["local_part"] == local), None) or (boxes[0] if boxes else None)
-    ids = [b["mailbox_id"] for b in boxes]
+    """Load the first screen with one database connection, including on a cold serverless start."""
+    now = time.monotonic()
     with conn() as c:
+        # Previously a cold start could open one connection to ensure mailbox rows, another to
+        # discover mailboxes, and a third to load the first page. Reuse this request's connection.
+        ensure_mailboxes(c=c)
+        with _cache_lock:
+            rows = _mb_cache["rows"] if _mb_cache["rows"] is not None and now - _mb_cache["at"] < MAILBOX_CACHE_TTL else None
+        if rows is None:
+            rows = _fetch_mailboxes(c)
+            with _cache_lock:
+                _mb_cache.update(at=now, rows=rows)
+        boxes = _visible_mailboxes(rows, user)
+        chosen = next((b for b in boxes if b["local_part"] == local), None) or (boxes[0] if boxes else None)
+        ids = [b["mailbox_id"] for b in boxes]
         data = _pulse(c, ids)
         items = _list_messages(c, chosen, chosen["local_part"], folder, "", limit, 0) if chosen else []
     return {"boxes": boxes, "mailbox": chosen["local_part"] if chosen else "", "items": items, **data}

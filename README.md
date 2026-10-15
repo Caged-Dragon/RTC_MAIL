@@ -12,7 +12,7 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 ## Features
 
 **Speed**
-- The first screen needs **one** request (`/api/bootstrap`: mailboxes, counts and the first page of mail) and shows a skeleton instantly; branding loads afterwards.
+- The first screen needs **one** request (`/api/bootstrap`: mailboxes, counts and the first page of mail) and shows a skeleton instantly; branding loads afterwards. The bootstrap route reuses one Postgres connection even on a cold Vercel function, and unread/latest/draft badges are fetched in one grouped query.
 - Mailboxes and permissions are cached in memory; a sync checks which emails are already stored with **one** query for the whole page (it used one database connection *per email*).
 - New mail appears within about 20 seconds through a tiny `/api/pulse` check; opening a message or trashing several at once no longer triggers extra count requests.
 - Static files are cacheable by the browser and Vercel's CDN, so a page load does not have to wake the Python function.
@@ -69,7 +69,7 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 ## Deploy on Vercel
 
 1. Push this folder to a GitHub repo and import it in Vercel (Framework: Other/FastAPI; no build command).
-2. Add the variables from `.env.example` (see `ENVIRONMENT.md`). `SUPABASE_URL` is prefilled for project `ybvsjuyznkdwvrnjnelr`; you must still supply that project’s own `DATABASE_URL` and `SUPABASE_ANON_KEY` from its dashboard.
+2. Add the variables from `.env.example` (see `ENVIRONMENT.md`). `SUPABASE_PROJECT_REF` and `SUPABASE_URL` are prefilled for the connected **RtCrackers Cart** project (`ypmiinmkyvzdpakbkers`). The earlier value `ybvsjuyznkdwvrnjnelr` is an organization ID, not a project reference. Supply the `DATABASE_URL` and `SUPABASE_ANON_KEY` from the same project in Vercel.
 3. Deploy, open the site, and sign in with the Supabase Auth user `admin@rtcrackers.com`.
 4. Use **Import older mail** once for the first import.
 5. In Resend, point the webhook at `https://<your-domain>/api/webhooks/resend`, enable **email.received** plus the delivery events (**email.delivered, email.bounced, email.complained, email.failed**), and set `RESEND_WEBHOOK_SECRET`.
@@ -106,9 +106,9 @@ Open `https://<your-domain>/api/health`:
 
 - `{"ok":true}` - the app process is running. This liveness route does not verify credentials or database access.
 
-Then open `https://<your-domain>/api/health/ready` after configuring the environment. It checks database connectivity, the six existing mail tables, and whether Supabase Auth, Resend sending, and Resend webhook verification are configured. It returns booleans only and never shows secrets. It returns HTTP 503 until every required check passes.
+Then open `https://<your-domain>/api/health/ready` after configuring the environment. It checks database connectivity, that the database and Supabase Auth URL match the expected project reference, the six existing mail tables, and whether Resend sending and webhook verification are configured. It returns booleans only and never shows secrets. It returns HTTP 503 until every required check passes.
 
-- On `/api/health/ready`, `{"ok":true,"checks":{...}}` with HTTP 200 means the database and all required provider configuration checks passed; HTTP 503 means at least one check is false.
+- On `/api/health/ready`, `{"ok":true,"checks":{...}}` with HTTP 200 means the database/project mapping and all required provider configuration checks passed; HTTP 503 means at least one check is false.
 - `{"ok":false,"startup_error":"..."}` on `/api/health` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
 - A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
 

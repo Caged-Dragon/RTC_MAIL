@@ -54,7 +54,9 @@ def test_readiness_checks_database_and_configuration_without_leaking_secrets(cli
             })
 
     monkeypatch.setattr(routes, "conn", lambda: FakeConnection())
-    monkeypatch.setattr(config, "SUPABASE_URL", "https://ybvsjuyznkdwvrnjnelr.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_PROJECT_REF", "ypmiinmkyvzdpakbkers")
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://ypmiinmkyvzdpakbkers.supabase.co")
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://postgres.ypmiinmkyvzdpakbkers:test@aws-0-ap-south-1.pooler.supabase.com:6543/postgres")
     monkeypatch.setattr(config, "SUPABASE_ANON_KEY", "test-anon-secret")
     monkeypatch.setattr(config, "RESEND_API_KEY", "test-resend-secret")
     monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "test-webhook-secret")
@@ -65,8 +67,10 @@ def test_readiness_checks_database_and_configuration_without_leaking_secrets(cli
         "ok": True,
         "checks": {
             "database": True,
+            "database_project_matches": True,
             "mail_schema": True,
             "supabase_auth_configured": True,
+            "supabase_auth_project_matches": True,
             "resend_sending_configured": True,
             "resend_webhook_configured": True,
         },
@@ -74,6 +78,36 @@ def test_readiness_checks_database_and_configuration_without_leaking_secrets(cli
     assert "test-anon-secret" not in response.text
     assert "test-resend-secret" not in response.text
     assert "test-webhook-secret" not in response.text
+
+
+def test_readiness_rejects_supabase_organisation_id_mistaken_for_project_id(client, monkeypatch):
+    class FakeCursor:
+        def __init__(self, result): self.result = result
+        def fetchone(self): return self.result
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        @staticmethod
+        def execute(sql):
+            if sql == "select 1": return FakeCursor((1,))
+            return FakeCursor({
+                "business_email_purposes": True, "business_email_addresses": True,
+                "mailboxes": True, "mailbox_access": True,
+                "email_messages": True, "email_recipients": True,
+            })
+
+    monkeypatch.setattr(routes, "conn", lambda: FakeConnection())
+    monkeypatch.setattr(config, "SUPABASE_PROJECT_REF", "ypmiinmkyvzdpakbkers")
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql://postgres.ypmiinmkyvzdpakbkers:test@aws-0-ap-south-1.pooler.supabase.com:6543/postgres")
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://ybvsjuyznkdwvrnjnelr.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_ANON_KEY", "test-key")
+    monkeypatch.setattr(config, "RESEND_API_KEY", "test-key")
+    monkeypatch.setattr(config, "RESEND_WEBHOOK_SECRET", "test-key")
+
+    response = client.get("/api/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["supabase_auth_project_matches"] is False
 
 
 def test_security_headers_present_on_api_and_static(client):

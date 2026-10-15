@@ -1,6 +1,7 @@
 import json
 import logging
 from typing import Literal
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -68,10 +69,28 @@ def health():
 @router.get("/health/ready")
 def readiness(response: Response):
     """Readiness probe for deployment setup. Reports booleans only, never secret values."""
+    # The reference is the Supabase *project* ref, not the organization ID. These
+    # checks catch a common misconfiguration where Auth is pointed at an organization
+    # ID or the DB pooler credentials belong to a different project.
+    expected_ref = config.SUPABASE_PROJECT_REF.lower()
+    try:
+        auth_host = (urlsplit(config.SUPABASE_URL).hostname or "").lower()
+        db_url = urlsplit(config.DATABASE_URL)
+        db_host = (db_url.hostname or "").lower()
+        db_user = (db_url.username or "").lower()
+    except ValueError:
+        # A malformed URL should cause readiness to fail, never a 500 with details.
+        auth_host = db_host = db_user = ""
+    database_project_matches = (
+        db_host == f"db.{expected_ref}.supabase.co"
+        or db_user == f"postgres.{expected_ref}"
+    )
     checks = {
         "database": False,
+        "database_project_matches": database_project_matches,
         "mail_schema": False,
         "supabase_auth_configured": bool(config.SUPABASE_URL and config.SUPABASE_ANON_KEY),
+        "supabase_auth_project_matches": auth_host == f"{expected_ref}.supabase.co",
         "resend_sending_configured": bool(config.RESEND_API_KEY),
         "resend_webhook_configured": bool(config.RESEND_WEBHOOK_SECRET),
     }

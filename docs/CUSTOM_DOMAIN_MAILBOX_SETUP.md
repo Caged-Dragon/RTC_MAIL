@@ -2,9 +2,9 @@
 
 # Connect this website to your supplied Supabase project
 
-The supplied project ID is `ybvsjuyznkdwvrnjnelr`, so the project's API URL is configured as `https://ybvsjuyznkdwvrnjnelr.supabase.co`. The project ID is not a credential and does not provide database access by itself. The `.env.local` in the originally uploaded archive referenced a different Supabase project; do not copy that old project's database password or API key into this deployment.
+The first value supplied, `ybvsjuyznkdwvrnjnelr`, is the Supabase **organization ID**, not the project reference. The connected project is **RtCrackers Cart**, project ref `ypmiinmkyvzdpakbkers`, with API URL `https://ypmiinmkyvzdpakbkers.supabase.co`. The existing production database has already been inspected: all required mail tables exist, and the ten active `@rtcrackers.com` addresses are registered below. No schema rebuild is required. Use credentials from this exact project; do not copy credentials from a different project.
 
-Before deploying, obtain the credentials directly from the Supabase dashboard for project `ybvsjuyznkdwvrnjnelr`. First, run this read-only check in that project's SQL Editor to see whether the required mail tables already exist:
+The connected database currently contains these ten active mailboxes: `account@rtcrackers.com`, `admin@rtcrackers.com`, `billing@rtcrackers.com`, `contact@rtcrackers.com`, `help@rtcrackers.com`, `info@rtcrackers.com`, `noreply@rtcrackers.com`, `orders@rtcrackers.com`, `sales@rtcrackers.com`, and `support@rtcrackers.com`. First, the read-only check below can be run from this project's SQL Editor to confirm the required mail tables:
 
 ```sql
 select
@@ -16,15 +16,15 @@ select
   to_regclass('public.email_recipients') as email_recipients;
 ```
 
-If any result is `NULL`, do not assume the full existing mail schema has been migrated to this project. Review the actual schema and apply only the missing, reviewed SQL; do not reset tables or run destructive archive scripts just to connect the app. In particular, `supabase/mail_exclusive_archive.sql` is documented as having been applied to the old project `ypmiinmkyvzdpakbkers`; it has not been verified for the supplied target project and changes archive triggers/RLS policies, including `customer_addresses` policies. Do not run it in the target project without a separate schema/security review.
+The connected project has been checked directly: all six required mail tables exist, ten active domain mailboxes are present, and the project migration history includes the mail archive/RLS hardening migrations. No schema rebuild is needed to connect this application. Do not rerun `supabase/mail_exclusive_archive.sql` as a setup step: it changes archive triggers and RLS policies (including `customer_addresses` policies), and repeat execution is not a substitute for a reviewed migration.
 
 1. In **Project Settings → Database → Connection string**, select the pooler connection string recommended for your hosting platform and copy its URI into the server-side `DATABASE_URL` environment variable. It must point to this same project. Replace any password placeholder locally in your hosting dashboard; do not paste the connection string into this chat or commit it to Git.
-2. In **Project Settings → API** (or the project's API keys panel), copy the publishable/anon key into `SUPABASE_ANON_KEY`. Keep `SUPABASE_URL` set to `https://ybvsjuyznkdwvrnjnelr.supabase.co`. The app uses these for Supabase Auth; `DATABASE_URL` is the separate server-side Postgres connection.
+2. In **Project Settings → API** (or the project's API keys panel), copy the publishable/anon key into `SUPABASE_ANON_KEY`. Set `SUPABASE_PROJECT_REF=ypmiinmkyvzdpakbkers` and `SUPABASE_URL=https://ypmiinmkyvzdpakbkers.supabase.co`. The app uses these for Supabase Auth; `DATABASE_URL` is the separate server-side Postgres connection.
 3. In the hosting dashboard, add `MAIL_DOMAIN=rtcrackers.com`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `MAIL_ADMIN_EMAIL`. Keep all keys server-side. Redeploy after saving environment variables.
-4. Open `https://<your-site>/api/health/ready`. Do not proceed until it returns `ok: true` and all checks are `true`. If `database` is false, verify the database URI belongs to project `ybvsjuyznkdwvrnjnelr`, the password is current, and the correct pooler/region was selected. If `supabase_auth_configured` is false, check the Auth URL and key. If a Resend check is false, set the corresponding Resend environment variable.
+4. Open `https://<your-site>/api/health/ready`. Do not proceed until it returns `ok: true` and all checks are `true`. If `database` is false, verify the database URI belongs to project `ypmiinmkyvzdpakbkers`, the password is current, and the correct pooler/region was selected. If `supabase_auth_configured` is false, check the Auth URL and key. If `database_project_matches` or `supabase_auth_project_matches` is false, update the associated URL/connection string to the `ypmiinmkyvzdpakbkers` project; `ybvsjuyznkdwvrnjnelr` is only the organization ID. If a Resend check is false, set the corresponding Resend environment variable.
 5. In the target project's SQL Editor, run the read-only mailbox queries in this guide first. Only run `supabase/mail_portal_setup.sql` if its tables/types do not already exist or are incomplete. Review SQL before execution; do not reset or drop existing mail tables.
 
-This app uses the existing Supabase tables `business_email_addresses`, `mailboxes`, `email_messages`, and `email_recipients`. It does not use a frontend-only list to decide which addresses can receive mail.
+This app uses the existing Supabase tables `business_email_addresses`, `mailboxes`, `email_messages`, and `email_recipients`. The live project already contains these tables and ten active addresses. It does not use a frontend-only list to decide which addresses can receive mail.
 
 ## 1. Check the real configured addresses
 
@@ -96,4 +96,4 @@ The app stores one mailbox-specific copy per matching configured recipient. Prov
 
 ## 5. Access control
 
-The included login flow is currently restricted to `MAIL_ADMIN_EMAIL` (defaults to `admin@<MAIL_DOMAIN>`). Database permissions support mailbox-scoped access, but separate-user login is not enabled by this patch. Keep that single-admin behavior until the intended user-to-mailbox assignments are defined and then implement and test the matching login/authorization policy explicitly.
+The included login flow is currently restricted to `MAIL_ADMIN_EMAIL` (defaults to `admin@<MAIL_DOMAIN>`). The live database has active admin allowlist entries for `admin@rtcrackers.com` and `developer@rtcrackers.com`, but the app authorizes only the address specified by `MAIL_ADMIN_EMAIL` as the portal administrator; mailbox-specific `mailbox_access` rows are currently empty. This retains the current administrator-only access model until you decide whether the ten mailboxes need separate users.
