@@ -96,27 +96,13 @@ create table if not exists public.email_recipients (
 
 insert into public.business_email_purposes (purpose_code, purpose_name) values
  ('admin','Admin'),('noreply','No reply'),('sales','Sales'),('support','Support'),
- ('information','Info'),('orders','Orders'),('billing','Billing'),('contact','Contact'),('account','Account'),('help','Help')
+ ('information','Info'),('orders','Orders'),('billing','Billing'),('contact','Contact'),('account','Account'),('help','Help'),('general','General')
 on conflict (purpose_code) do update set purpose_name = excluded.purpose_name;
 
-insert into public.business_email_addresses
-  (email_purpose_id,email_address,display_name,is_active,is_public,is_primary)
-select p.email_purpose_id, x.email_address, x.display_name, true, false, x.is_primary
-from (values
- ('admin','admin@rtcrackers.com','RT Crackers Administration',true),
- ('sales','sales@rtcrackers.com','RT Crackers Sales',false),
- ('support','support@rtcrackers.com','RT Crackers Support',false),
- ('account','account@rtcrackers.com','RT Crackers Accounts',false),
- ('noreply','noreply@rtcrackers.com','RT Crackers No Reply',false),
- ('billing','billing@rtcrackers.com','RT Crackers Billing',false),
- ('contact','contact@rtcrackers.com','RT Crackers Contact',false),
- ('help','help@rtcrackers.com','RT Crackers Help',false),
- ('information','info@rtcrackers.com','RT Crackers Information',false),
- ('orders','orders@rtcrackers.com','RT Crackers Orders',false)
-) as x(purpose_code,email_address,display_name,is_primary)
-join public.business_email_purposes p on p.purpose_code=x.purpose_code
-on conflict (email_address) do update
-set display_name=excluded.display_name, is_active=true, is_primary=excluded.is_primary;
+-- Do not seed placeholder mailbox addresses. Add your actual active email addresses to
+-- public.business_email_addresses (with the appropriate email_purpose_id). The application
+-- discovers every active address for MAIL_DOMAIN and creates missing mailbox rows automatically.
+-- This setup script deliberately does not assume that any example list is the real mailbox list.
 
 insert into public.mailboxes
   (business_email_id,business_id,email_address,local_part,display_name,mailbox_type)
@@ -134,6 +120,7 @@ select b.business_email_id,1,lower(b.email_address),lower(split_part(b.email_add
 from public.business_email_addresses b
 join public.business_email_purposes p using(email_purpose_id)
 where b.is_active
+  and lower(split_part(b.email_address,'@',2)) = lower('rtcrackers.com')
 on conflict (business_email_id) do update
 set email_address=excluded.email_address,
     local_part=excluded.local_part,

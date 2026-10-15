@@ -78,7 +78,7 @@ def ensure_mailboxes(force: bool = False) -> None:
         c.execute(
             """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
                select b.business_email_id,
-                      (select min(business_id) from mailboxes),
+                      coalesce((select min(business_id) from mailboxes), 1),
                       lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
                       case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
                            when 'support' then 'support' when 'billing' then 'billing'
@@ -88,7 +88,6 @@ def ensure_mailboxes(force: bool = False) -> None:
                where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
                  and not exists (select 1 from mailboxes m where m.business_email_id = b.business_email_id)
                  and not exists (select 1 from mailboxes m where m.email_address = lower(b.email_address))
-                 and (select min(business_id) from mailboxes) is not null
                on conflict do nothing""",
             (config.MAIL_DOMAIN,),
         )
@@ -106,12 +105,14 @@ def _fetch_mailboxes() -> list[dict]:
                       m.is_receiving_enabled, m.is_sending_enabled
                from mailboxes m
                join business_email_addresses b on b.business_email_id = m.business_email_id and b.is_active
-               where m.is_active and m.email_address like %s and m.local_part = any(%s)
+               where m.is_active and lower(split_part(m.email_address, '@', 2)) = %s
                order by m.email_address, m.mailbox_id""",
-            ("%@" + config.MAIL_DOMAIN, config.REQUIRED_LOCALS),
+            (config.MAIL_DOMAIN,),
         ).fetchall()
-    req = {n: i for i, n in enumerate(config.REQUIRED_LOCALS)}
-    rows.sort(key=lambda r: (req.get(r["local_part"], 99), r["local_part"]))
+    # Known local-parts may be placed first for continuity, but this is only a sort preference.
+    # Addresses outside MAILBOX_ORDER are still returned and routed normally.
+    priority = {local: i for i, local in enumerate(config.MAILBOX_ORDER)}
+    rows.sort(key=lambda r: (priority.get(r["local_part"], len(priority)), r["local_part"]))
     return rows
 
 
@@ -148,6 +149,9 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
     if not rid:
         return result
     if boxes is None:
+        # A receiving webhook may be the first request after deploy. Discover mailbox rows here
+        # rather than depending on an authenticated page load or the periodic sync to create them.
+        ensure_mailboxes()
         boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
 
     targets = []
@@ -163,7 +167,7 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
 
     if known is None:
         known = _load_known([rid])
-    stored, base_used = known.get(rid, (set(), False))
+    stored, _legacy_base_used = known.get(rid, (set(), False))
     stored = set(stored)
 
     full = None
@@ -183,7 +187,10 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
         name, from_addr = parseaddr(full.get("from") or "")
         text, html = full.get("text") or "", full.get("html") or ""
         when = norm_ts(full.get("created_at"))
-        stored_id = rid if not base_used else f"{rid}#{box['mailbox_id']}"
+        # Use a deterministic per-mailbox provider id. This remains safe if two identical webhook
+        # deliveries are processed concurrently: every mailbox has its own unique id, rather than
+        # racing to claim a shared unsuffixed id for the first recipient.
+        stored_id = f"{rid}#{box['mailbox_id']}"
         with conn() as c:
             row = c.execute(
                 """insert into email_messages
@@ -196,24 +203,28 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
                  make_snippet(text, html), text, html, when, stored_id),
             ).fetchone()
             if row:
-                base_used = True
                 result["new"] += 1
                 _insert_recipients(c, row["email_message_id"], full)
+            else:
+                # A concurrent webhook may have inserted this mailbox copy after _load_known().
+                result["known"] = True
     return result
 
 
 def _load_known(rids: list[str]) -> dict:
     """Which of these Resend emails are already stored, and for which mailboxes? One query for any number of ids.
 
-    Returns {resend_id: (set_of_mailbox_ids, base_id_is_used)}. A message delivered to two of our mailboxes is
-    stored as <id> and <id>#<mailbox_id>, so both forms are matched on the part before the '#'.
+    Returns {resend_id: (set_of_mailbox_ids, legacy_base_id_is_used)}. New inbound messages use a deterministic
+    <id>#<mailbox_id> key for each mailbox. The unsuffixed form is still recognized for messages stored by older
+    versions so webhook retries do not duplicate historical mail.
     """
     rids = [r for r in rids if r]
     if not rids:
         return {}
     with conn() as c:
         rows = c.execute(
-            "select mailbox_id, resend_email_id from email_messages where split_part(resend_email_id, '#', 1) = any(%s)",
+            "select mailbox_id, resend_email_id from email_messages where direction = 'inbound' "
+            "and split_part(resend_email_id, '#', 1) = any(%s)",
             (rids,),
         ).fetchall()
     out: dict = {}

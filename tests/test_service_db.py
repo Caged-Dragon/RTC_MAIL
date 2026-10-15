@@ -25,11 +25,34 @@ def fake_resend(monkeypatch):
     return type("F", (), {"sent": sent, "fetched": fetched})
 
 
-def test_ensure_mailboxes_creates_all_required(db):
+def test_ensure_mailboxes_creates_all_configured_domain_addresses(db):
     service.ensure_mailboxes()
     service.ensure_mailboxes()  # idempotent
     locals_ = [b["local_part"] for b in service.list_mailboxes(ADMIN)]
     assert locals_ == ["admin", "sales", "support", "account", "noreply", "billing", "contact", "help", "info", "orders"]
+
+
+
+def test_custom_domain_mailbox_is_discovered_and_created_without_hardcoded_localpart(db, fake_resend):
+    # This address is deliberately not in MAILBOX_ORDER. It must still become a mailbox.
+    from mailcore.db import conn
+
+    with conn() as c:
+        c.execute(
+            """insert into business_email_addresses (email_purpose_id, email_address, display_name, is_active)
+               select email_purpose_id, 'warehouse@rtcrackers.com', 'RT Crackers Warehouse', true
+               from business_email_purposes where purpose_code = 'general'"""
+        )
+    service.clear_caches()
+
+    # Do not call ensure_mailboxes() or load /api/config first: a first inbound webhook must work.
+    result = service.ingest_received(received("custom-address", to="warehouse@rtcrackers.com"))
+    assert result["new"] == 1 and result["ours"] is True
+    boxes = service.list_mailboxes(ADMIN)
+    warehouse = next(b for b in boxes if b["address"] == "warehouse@rtcrackers.com")
+    assert warehouse["local_part"] == "warehouse"
+    assert warehouse["label"] == "RT Crackers Warehouse"
+    assert len(service.list_messages(ADMIN, "warehouse", "inbox")) == 1
 
 
 def test_ingest_stores_message_and_is_idempotent(db, fake_resend):
@@ -553,8 +576,8 @@ def test_known_lookup_understands_multi_mailbox_ids(db, fake_resend):
     service.ingest_received({"id": "multi", "to": ["sales@rtcrackers.com"], "cc": ["support@rtcrackers.com"]})
     service.ingest_received({"id": "single", "to": ["info@rtcrackers.com"]})
     known = service._load_known(["multi", "single", "never-seen", ""])
-    assert len(known["multi"][0]) == 2 and known["multi"][1] is True
-    assert len(known["single"][0]) == 1 and "never-seen" not in known
+    assert len(known["multi"][0]) == 2 and known["multi"][1] is False
+    assert len(known["single"][0]) == 1 and known["single"][1] is False and "never-seen" not in known
     assert service._load_known([]) == {}
 
 

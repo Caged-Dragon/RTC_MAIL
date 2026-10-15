@@ -1,6 +1,6 @@
 # RT Crackers Mail (Supabase + Vercel)
 
-A private, **Gmail / Outlook-style webmail** for the 10 RT Crackers business mailboxes: `admin`, `sales`, `support`, `account`, `noreply`, `billing`, `contact`, `help`, `info` and `orders` at `@rtcrackers.com`.
+A private, **Gmail / Outlook-style webmail** for RT Crackers business mailboxes on `@rtcrackers.com`. The app discovers every active address for `MAIL_DOMAIN` from `business_email_addresses`; it does not require a hard-coded list of ten local-parts. The examples and preferred display order are not an allowlist.
 Mail is sent and received through **Resend**, stored in your **Supabase Postgres**, and protected by **Supabase Auth**. The server is a small **FastAPI** app; the interface is plain HTML/CSS/JavaScript with no build step.
 
 ![Main screen](docs/screenshots/01-main-layout-annotated.png)
@@ -19,7 +19,7 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 
 **Reading and navigation**
 - Three-pane layout: folders (Inbox, Starred, Sent, Drafts, Trash with counts), message list, reader.
-- Switch between all 10 mailboxes with unread badges; you stay in the same folder.
+- Switch between all configured mailboxes with unread badges; you stay in the same folder.
 - Gmail-style dates, unread styling, avatars, expandable message details, delivery-status chips on sent mail.
 - Phone layout: one pane at a time with a Back button and floating Compose button.
 
@@ -63,7 +63,8 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 1. **Resend webhook (instant mail).** In Resend open *Webhooks*, add `https://<your-domain>/api/webhooks/resend`, tick **email.received** plus **email.delivered, email.bounced, email.complained, email.failed**, copy the signing secret (`whsec_...`) into Vercel as `RESEND_WEBHOOK_SECRET`, then redeploy. Without it, mail only arrives when the browser polls (every minute).
 2. **Function region.** In Supabase open *Project Settings > General* and note the region. In Vercel open *Settings > Functions* and set the **Function Region** to the closest one. Every database call crosses that distance, so a far-away region is the biggest remaining cost.
 3. **Connection string.** Use Supabase's **pooler** connection string for `DATABASE_URL` (not the direct `db.<ref>.supabase.co` host).
-4. **Redeploy after changing any environment variable.**
+4. **Set up the real mailbox addresses.** The source of truth is `public.business_email_addresses`. Do not assume the starter examples are your address list. See [`docs/CUSTOM_DOMAIN_MAILBOX_SETUP.md`](docs/CUSTOM_DOMAIN_MAILBOX_SETUP.md).
+5. **Redeploy after changing any environment variable.**
 
 ## Deploy on Vercel
 
@@ -81,6 +82,7 @@ The server holds the Postgres connection; the database URL is never exposed to t
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Supabase Auth |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` | Resend sending/receiving and webhook verification |
 | `MAIL_DOMAIN` | Company mail domain (default `rtcrackers.com`) |
+| `MAILBOX_ORDER` | Optional comma-separated display-order preference; it never filters addresses |
 | `MAIL_ADMIN_EMAIL` | The one account allowed to sign in (default `admin@<MAIL_DOMAIN>`) |
 | `SYNC_BUDGET_SECONDS` | Time limit for one sync (default 45) |
 | `MAIL_DEV_NO_AUTH=1` | Local development only; ignored on Vercel |

@@ -35,7 +35,13 @@ ADMIN_EMAIL = _env("MAIL_ADMIN_EMAIL", f"admin@{MAIL_DOMAIN}").lower()
 # Local-only escape hatch; can never be enabled on Vercel.
 DEV_NO_AUTH = _env("MAIL_DEV_NO_AUTH") == "1" and not os.getenv("VERCEL")
 
-REQUIRED_LOCALS = [
+# Optional display-order preference only. This list never limits which addresses become mailboxes.
+# Every active address in business_email_addresses for MAIL_DOMAIN is discoverable.
+_DEFAULT_MAILBOX_ORDER = (
     "admin", "sales", "support", "account", "noreply",
     "billing", "contact", "help", "info", "orders",
+)
+MAILBOX_ORDER = [
+    part.strip().lower() for part in _env("MAILBOX_ORDER", ",".join(_DEFAULT_MAILBOX_ORDER)).split(",")
+    if part.strip()
 ]
