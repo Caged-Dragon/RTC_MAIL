@@ -1,6 +1,6 @@
 # RT Crackers Mail (Supabase + Vercel)
 
-A private, **Gmail / Outlook-style webmail** for RT Crackers business mailboxes on `@rtcrackers.com`. The app discovers every active address for `MAIL_DOMAIN` from `business_email_addresses`; it does not require a hard-coded list of ten local-parts. The examples and preferred display order are not an allowlist.
+A private, **Gmail / Outlook-style webmail** for the 10 RT Crackers business mailboxes: `admin`, `sales`, `support`, `account`, `noreply`, `billing`, `contact`, `help`, `info` and `orders` at `@rtcrackers.com`.
 Mail is sent and received through **Resend**, stored in your **Supabase Postgres**, and protected by **Supabase Auth**. The server is a small **FastAPI** app; the interface is plain HTML/CSS/JavaScript with no build step.
 
 ![Main screen](docs/screenshots/01-main-layout-annotated.png)
@@ -11,15 +11,9 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 
 ## Features
 
-**Speed**
-- The first screen needs **one** request (`/api/bootstrap`: mailboxes, counts and the first page of mail) and shows a skeleton instantly; branding loads afterwards. The bootstrap route reuses one Postgres connection even on a cold Vercel function, and unread/latest/draft badges are fetched in one grouped query.
-- Mailboxes and permissions are cached in memory; a sync checks which emails are already stored with **one** query for the whole page (it used one database connection *per email*).
-- New mail appears within about 20 seconds through a tiny `/api/pulse` check; opening a message or trashing several at once no longer triggers extra count requests.
-- Static files are cacheable by the browser and Vercel's CDN, so a page load does not have to wake the Python function.
-
 **Reading and navigation**
 - Three-pane layout: folders (Inbox, Starred, Sent, Drafts, Trash with counts), message list, reader.
-- Switch between all configured mailboxes with unread badges; you stay in the same folder.
+- Switch between all 10 mailboxes with unread badges; you stay in the same folder.
 - Gmail-style dates, unread styling, avatars, expandable message details, delivery-status chips on sent mail.
 - Phone layout: one pane at a time with a Back button and floating Compose button.
 
@@ -42,6 +36,11 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 - Delivery status from Resend webhooks: Delivered, Bounced, Failed, Spam report (a bounce can never be hidden by a late event).
 - Incoming mail via webhook, 60-second auto-sync and *Import older mail*; one sync at a time; rate-limited Resend client with retry.
 
+**Mail lock (administrators)**
+- Every active ID in `admin_access` can sign in (same IDs as the admin site).
+- *Mail lock & archive* panel: live DNS check that no other mail server can hold company mail, plus a permanent, searchable, append-only archive.
+- Mail for an unknown `@rtcrackers.com` address is filed in the admin mailbox instead of being dropped.
+
 **Privacy and security**
 - Remote images blocked by default (no tracking pixels); *Load images* per message.
 - HTML mail rendered in a sandboxed iframe with its own Content-Security-Policy.
@@ -58,19 +57,11 @@ Mail is sent and received through **Resend**, stored in your **Supabase Postgres
 | `X` | Select | `U` / `Esc` | Back / clear selection |
 | `G` then `I S T D B` | Go to Inbox, Starred, Sent, Drafts, Trash | `?` | Help |
 
-## Make incoming mail instant and the site fast (Vercel checklist)
-
-1. **Resend webhook (instant mail).** In Resend open *Webhooks*, add `https://<your-domain>/api/webhooks/resend`, tick **email.received** plus **email.delivered, email.bounced, email.complained, email.failed**, copy the signing secret (`whsec_...`) into Vercel as `RESEND_WEBHOOK_SECRET`, then redeploy. Without it, mail only arrives when the browser polls (every minute).
-2. **Function region.** In Supabase open *Project Settings > General* and note the region. In Vercel open *Settings > Functions* and set the **Function Region** to the closest one. Every database call crosses that distance, so a far-away region is the biggest remaining cost.
-3. **Connection string.** Use Supabase's **pooler** connection string for `DATABASE_URL` (not the direct `db.<ref>.supabase.co` host).
-4. **Set up the real mailbox addresses.** The source of truth is `public.business_email_addresses`. Do not assume the starter examples are your address list. See [`docs/CUSTOM_DOMAIN_MAILBOX_SETUP.md`](docs/CUSTOM_DOMAIN_MAILBOX_SETUP.md).
-5. **Redeploy after changing any environment variable.**
-
 ## Deploy on Vercel
 
 1. Push this folder to a GitHub repo and import it in Vercel (Framework: Other/FastAPI; no build command).
-2. Add the variables from `.env.example` (see `ENVIRONMENT.md`). `SUPABASE_PROJECT_REF` and `SUPABASE_URL` are prefilled for the connected **RtCrackers Cart** project (`ypmiinmkyvzdpakbkers`). The earlier value `ybvsjuyznkdwvrnjnelr` is an organization ID, not a project reference. Supply the `DATABASE_URL` and `SUPABASE_ANON_KEY` from the same project in Vercel.
-3. Deploy, open the site, and sign in with the Supabase Auth user `admin@rtcrackers.com`.
+2. Add the variables from `.env.example` (see `ENVIRONMENT.md`).
+3. Deploy, open the site, and sign in with any active admin ID (`admin@` or `developer@`). If it fails, open `/api/diagnose`.
 4. Use **Import older mail** once for the first import.
 5. In Resend, point the webhook at `https://<your-domain>/api/webhooks/resend`, enable **email.received** plus the delivery events (**email.delivered, email.bounced, email.complained, email.failed**), and set `RESEND_WEBHOOK_SECRET`.
 
@@ -82,8 +73,7 @@ The server holds the Postgres connection; the database URL is never exposed to t
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Supabase Auth |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` | Resend sending/receiving and webhook verification |
 | `MAIL_DOMAIN` | Company mail domain (default `rtcrackers.com`) |
-| `MAILBOX_ORDER` | Optional comma-separated display-order preference; it never filters addresses |
-| `MAIL_ADMIN_EMAIL` | The one account allowed to sign in (default `admin@<MAIL_DOMAIN>`) |
+| `MAIL_ADMIN_EMAIL` | Legacy and optional: every active admin in `admin_access` can sign in |
 | `SYNC_BUDGET_SECONDS` | Time limit for one sync (default 45) |
 | `MAIL_DEV_NO_AUTH=1` | Local development only; ignored on Vercel |
 
@@ -99,22 +89,6 @@ uvicorn main:app --reload
 For local work without Supabase Auth set `MAIL_DEV_NO_AUTH=1` in `.env`.
 
 > **Keep secrets out of Git:** put real keys in `.env` (git-ignored), never in `.env.example`, which is committed and must stay empty. A unit test fails if a key ends up there.
-
-## Troubleshooting
-
-Open `https://<your-domain>/api/health`:
-
-- `{"ok":true}` - the app process is running. This liveness route does not verify credentials or database access.
-
-Then open `https://<your-domain>/api/health/ready` after configuring the environment. It checks database connectivity, that the database and Supabase Auth URL match the expected project reference, the six existing mail tables, and whether Resend sending and webhook verification are configured. It returns booleans only and never shows secrets. It returns HTTP 503 until every required check passes.
-
-- On `/api/health/ready`, `{"ok":true,"checks":{...}}` with HTTP 200 means the database/project mapping and all required provider configuration checks passed; HTTP 503 means at least one check is false.
-- `{"ok":false,"startup_error":"..."}` on `/api/health` - the app could not load; the message names the cause (usually a missing package or an unsupported Python version).
-- A Vercel "FUNCTION_INVOCATION_FAILED" page - the platform itself failed; open the project's **Logs** in Vercel and read the last lines.
-
-Dependencies are declared in **both** `requirements.txt` and `pyproject.toml` (a unit test keeps them identical), because hosts such as Vercel may install from either. If a deploy fails at startup with `No module named 'fastapi'`, the install step did not run - check the build log.
-
-After adding or changing Environment Variables in Vercel, **redeploy** - changes only apply to new deployments. On Vercel use Supabase's **pooler** connection string for `DATABASE_URL`, not the direct `db.<ref>.supabase.co` host.
 
 ## Tests
 

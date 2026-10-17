@@ -1,28 +1,20 @@
-"""RT Crackers Mail (Supabase + Vercel)."""
+"""RT Crackers Mail (Supabase + Vercel).
+
+NOTE FOR DEPLOYMENT: Vercel looks for a literal top-level `app = FastAPI(...)` in this file. Keep it exactly like that."""
+import importlib
 import logging
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+import psycopg
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.datastructures import MutableHeaders
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("rtmail")
 
 PUBLIC = Path(__file__).resolve().parent / "public"
-
-# If anything fails while the application modules load (a missing package, an incompatible Python version, ...)
-# the function would otherwise die with an opaque platform error. Keep it alive and say what went wrong instead.
-STARTUP_ERROR = None
-try:
-    import psycopg
-    from mailcore.routes import router
-except Exception as exc:  # noqa: BLE001 - deliberately broad, the error is reported below
-    psycopg = None
-    router = None
-    STARTUP_ERROR = f"{type(exc).__name__}: {exc}"[:400]
-    log.exception("Application failed to start")
 
 # Kept deliberately light: the app only loads its own scripts and renders untrusted mail
 # inside a sandboxed iframe that carries its own policy.
@@ -34,48 +26,22 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": "script-src 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'",
 }
 
-
-# index.html, style.css and app.js are identical for every visitor. Letting the browser and Vercel's CDN keep them
-# means a page load does not have to wake the Python function (a cold start) just to fetch three static files.
-STATIC_CACHE = "public, max-age=60, s-maxage=300, stale-while-revalidate=3600"
-
-
-class SecurityHeadersMiddleware:
-    """Adds the headers above to every HTTP response. Plain ASGI (no BaseHTTPMiddleware) so it is
-    lightweight and behaves the same on any host, including Vercel."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        is_static = scope.get("method") in ("GET", "HEAD") and not scope.get("path", "").startswith("/api")
-
-        async def send_with_headers(message):
-            if message["type"] == "http.response.start":
-                headers = MutableHeaders(scope=message)
-                for name, value in SECURITY_HEADERS.items():
-                    if name not in headers:
-                        headers[name] = value
-                if is_static and message.get("status") == 200 and "cache-control" not in headers:
-                    headers["Cache-Control"] = STATIC_CACHE
-            await send(message)
-
-        await self.app(scope, receive, send_with_headers)
-
-
 app = FastAPI(title="RT Crackers Mail", docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(SecurityHeadersMiddleware)
 
-if psycopg is not None:
-    @app.exception_handler(psycopg.Error)
-    async def database_error(request: Request, exc: psycopg.Error):
-        """Return clean JSON (which the frontend can display) instead of a bare 500 page."""
-        log.error("Database error on %s %s: %s", request.method, request.url.path, exc)
-        return JSONResponse({"detail": "Database temporarily unavailable. Please try again."}, status_code=503)
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
+@app.exception_handler(psycopg.Error)
+async def database_error(request: Request, exc: psycopg.Error):
+    """Return clean JSON (which the frontend can display) instead of a bare 500 page."""
+    log.error("Database error on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse({"detail": "Database temporarily unavailable. Please try again."}, status_code=503)
 
 
 @app.exception_handler(RuntimeError)
@@ -85,16 +51,49 @@ async def runtime_error(request: Request, exc: RuntimeError):
         log.error("Configuration error on %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse({"detail": "Server is not fully configured."}, status_code=503)
     log.exception("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
-    return JSONResponse({"detail": "Internal server error"}, status_code=500)
+    return JSONResponse({"detail": "Internal server error", "error": type(exc).__name__}, status_code=500)
 
 
-if router is not None:
-    app.include_router(router)
-else:
-    @app.get("/api/health")
-    def health_when_broken():
-        """Visible in the browser: shows exactly why the app could not start."""
-        return JSONResponse({"ok": False, "startup_error": STARTUP_ERROR}, status_code=503)
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception):
+    # Names the kind of failure (never the message, which could hold private data); the full traceback is in the logs.
+    log.exception("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse({"detail": "Internal server error", "error": type(exc).__name__}, status_code=500)
+
+
+def _failure_router(exc: BaseException) -> APIRouter:
+    """If the mail code itself cannot be imported, answer every request with the reason instead of a blank 500."""
+    packages = {}
+    for name in ("fastapi", "starlette", "pydantic", "psycopg", "svix", "httpx", "dotenv"):
+        try:
+            importlib.import_module(name)
+            packages[name] = "ok"
+        except Exception as e:  # noqa: BLE001 - report every kind of failure
+            packages[name] = f"{type(e).__name__}: {e}"[:200]
+    body = {
+        "detail": "The mail server started but its code could not be loaded.",
+        "error": f"{type(exc).__name__}: {exc}"[:500],
+        "python": sys.version.split()[0],
+        "packages": packages,
+        "hint": "'No module named X' means X did not install (check requirements.txt and the Vercel build log). "
+                "A Python version far from 3.12 can also cause this: keep the .python-version file containing 3.12.",
+    }
+    log.error("Mail code failed to import: %s: %s", type(exc).__name__, exc)
+    failing = APIRouter()
+
+    @failing.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], include_in_schema=False)
+    async def report(full_path: str):
+        return JSONResponse(body, status_code=500, headers={"Cache-Control": "no-store"})
+
+    return failing
+
+
+try:
+    from mailcore.routes import router
+except Exception as import_error:  # noqa: BLE001
+    router = _failure_router(import_error)
+
+app.include_router(router)
 
 if PUBLIC.is_dir():
     app.mount("/", StaticFiles(directory=PUBLIC, html=True), name="frontend")

@@ -1,7 +1,6 @@
 // RT Crackers Mail - vanilla JS, no build step.
 const $ = (s) => document.querySelector(s);
 const SYNC_INTERVAL_MS = 60000;
-const PULSE_INTERVAL_MS = 20000;   // cheap 'anything new?' check
 const AUTOSAVE_MS = 1500;
 const PAGE_SIZE = 50;
 // Detects remote resources in mail HTML (src/srcset/background attributes and CSS url()).
@@ -15,9 +14,8 @@ const session = {
 };
 
 
-const savedBox = (() => { try { return localStorage.getItem("rtmail.box"); } catch { return null; } })();
 const S = {
-  cfg: null, box: savedBox || "admin", latest: {}, syncTimer: null, view: "inbox", openId: null, openMsg: null,
+  cfg: null, box: "admin", view: "inbox", openId: null, openMsg: null,
   counts: {}, drafts: {}, q: "", timer: null, listReq: 0, syncing: false,
   compose: null, prevView: "inbox",
   items: [], sel: new Set(), cur: -1, hasMore: false, loading: false,
@@ -32,40 +30,38 @@ const EMPTY = {
 };
 const enc = encodeURIComponent;
 
-function applyCompany(company) {
-  document.querySelectorAll(".brand").forEach((brand) => {
-    const name = brand.querySelector(".company-brand-name");
-    const logo = brand.querySelector(".brand-logo");
-    if (name && company.company_name) name.textContent = company.company_name;
-    if (logo) {
-      if (company.logo_url) { logo.src = company.logo_url; logo.alt = company.company_name ? company.company_name + " logo" : "Company logo"; logo.hidden = false; }
-      else logo.hidden = true;
-    }
-  });
-}
-
-function applyTheme(t) {
-  const root = document.documentElement;
-  const vars = {
-    "--rtc-bg": t.background_color, "--rtc-surface": t.surface_color,
-    "--rtc-text": t.text_color, "--rtc-muted": t.muted_text_color,
-    "--rtc-heading": t.heading_color, "--rtc-primary": t.primary_color,
-    "--rtc-accent": t.accent_color, "--rtc-border": t.border_color,
-    "--rtc-header": t.header_color, "--rtc-nav": t.nav_background_color,
-    "--rtc-nav-text": t.nav_text_color
-  };
-  for (const [k, v] of Object.entries(vars)) if (v) root.style.setProperty(k, v);
-}
-
-// Theme + company logo in ONE request. Called after the first screen is on display so it never competes
-// with (or cold-starts a second copy of) the server for the data the user is waiting for.
-async function loadBranding() {
+async function applyCompanyBrand() {
   try {
-    const res = await fetch("/api/branding");
+    const res = await fetch("/api/company");
     if (!res.ok) return;
-    const data = await res.json();
-    applyCompany(data.company || {});
-    applyTheme(data.theme || {});
+    const company = await res.json();
+    document.querySelectorAll(".brand").forEach((brand) => {
+      const name = brand.querySelector(".company-brand-name");
+      const logo = brand.querySelector(".brand-logo");
+      if (name && company.company_name) name.textContent = company.company_name;
+      if (logo) {
+        if (company.logo_url) { logo.src = company.logo_url; logo.alt = company.company_name ? company.company_name + " logo" : "Company logo"; logo.hidden = false; }
+        else logo.hidden = true;
+      }
+    });
+  } catch {}
+}
+
+async function applyDbTheme() {
+  try {
+    const res = await fetch("/api/theme");
+    if (!res.ok) return;
+    const t = await res.json();
+    const root = document.documentElement;
+    const vars = {
+      "--rtc-bg": t.background_color, "--rtc-surface": t.surface_color,
+      "--rtc-text": t.text_color, "--rtc-muted": t.muted_text_color,
+      "--rtc-heading": t.heading_color, "--rtc-primary": t.primary_color,
+      "--rtc-accent": t.accent_color, "--rtc-border": t.border_color,
+      "--rtc-header": t.header_color, "--rtc-nav": t.nav_background_color,
+      "--rtc-nav-text": t.nav_text_color
+    };
+    for (const [k, v] of Object.entries(vars)) if (v) root.style.setProperty(k, v);
   } catch {}
 }
 
@@ -407,7 +403,7 @@ async function bulk(action, ids) {
   S.sel = new Set();
   if (S.openId && ids.includes(S.openId) && ["trash", "restore", "delete_forever", "unread"].includes(action)) closeReader();
   applyLocal(action, ids);
-  scheduleRefresh();
+  refreshCounts();
 
   if (action === "trash") {
     toast(`${n} message${plural} moved to Trash`, false, { label: "Undo", run: async () => { await bulk("restore", ids); loadList(); } });
@@ -458,18 +454,11 @@ function closeReader() {
 async function openMessage(id) {
   let m;
   try { m = await api(`/messages/${id}`); } catch (e) { return toast(e.message, true); }
-  const listed = S.items.find((x) => x.id === id);
-  const wasUnread = !!listed && !listed.is_read && m.folder === "inbox" && !m.deleted;
   S.openId = id;
   S.openMsg = m;
   markRowOpen(id);
   $("#app").classList.add("reading");
-  if (wasUnread) {   // the server marked it read; update the badge here instead of asking for new counts
-    const k = m.mailbox;
-    S.counts[k] = Math.max(0, (S.counts[k] || 0) - 1);
-    if (!S.counts[k]) delete S.counts[k];
-    renderBoxes();
-  }
+  if (m.folder === "inbox" && !m.deleted) refreshCounts();   // opening a message marks it read on the server
   renderReader(m);
 }
 
@@ -652,10 +641,10 @@ function renderCompose(p = {}) {
       try {
         const r = await api("/drafts", { method: "POST", body: JSON.stringify(payload()) });
         if (r.id) {
-          if (!c.draftId) bumpDrafts(from.value, 1);
           c.draftId = r.id;
           discard.textContent = "Delete draft";
           status.textContent = "Draft saved at " + new Date().toLocaleTimeString([], { timeStyle: "short" });
+          refreshCounts();
         } else status.textContent = "";
       } catch (e) {
         c.dirty = true;
@@ -747,14 +736,13 @@ function setView(view) {
   readerPlaceholder();
   renderRows();
   saving.then(() => {
-    if (wasComposing) scheduleRefresh();   // draft counts may have changed
+    if (wasComposing) refreshCounts();   // draft counts may have changed
     if (S.view === view) loadList();     // ignore if the user already moved on
   });
 }
 
 function selectBox(id) {
   S.box = id;
-  rememberBox();
   renderBoxes();
   setView(S.view === "compose" ? "inbox" : S.view);
 }
@@ -772,10 +760,8 @@ async function sync(silent = false, full = false) {
     if (r.new) toast(`${r.new} new message${r.new > 1 ? "s" : ""}`);
     else if (!silent) toast(r.failed ? `Inbox synced, but ${r.failed} message(s) could not be downloaded` : "Inbox is up to date");
     if (r.partial && !silent) toast("Sync stopped early to stay within the time limit. Run it again to continue.");
-    if (r.new) {
-      await refreshCounts();
-      if (S.view === "inbox") loadList();   // don't redraw the list when nothing changed
-    }
+    await refreshCounts();
+    if (r.new && S.view === "inbox") loadList();   // don't redraw the list when nothing changed
   } catch (e) {
     if (!silent) toast(e.message, true);
   } finally {
@@ -785,42 +771,10 @@ async function sync(silent = false, full = false) {
   }
 }
 
-// Applies a /pulse result. Returns true when the mailbox being viewed received newer inbox mail.
-function applyPulse(p) {
-  const had = S.latest[S.box] || 0;
-  S.counts = p.counts || {};
-  S.drafts = p.drafts || {};
-  S.latest = p.latest || {};
-  if (S.cfg) renderBoxes();
-  return (S.latest[S.box] || 0) > had;
-}
-
 async function refreshCounts() {
-  let p;
-  try { p = await api("/pulse"); } catch { return false; }
-  return applyPulse(p);
-}
-
-let refreshTimer;
-function scheduleRefresh(delay = 700) {   // several quick actions (e.g. trashing 5 messages) cost one request
-  clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(refreshCounts, delay);
-}
-
-function bumpDrafts(box, delta) {
-  S.drafts[box] = Math.max(0, (S.drafts[box] || 0) + delta);
-  if (!S.drafts[box]) delete S.drafts[box];
+  try { S.counts = await api("/counts"); } catch {}
+  try { S.drafts = await api("/counts/drafts"); } catch {}
   if (S.cfg) renderBoxes();
-}
-
-async function pollPulse() {
-  if (document.hidden || !S.cfg) return;
-  let p;
-  try { p = await api("/pulse"); } catch { return; }
-  if (applyPulse(p)) {
-    toast("New mail");
-    if (S.view === "inbox" && !S.q) loadList();
-  }
 }
 
 function showLogin() {
@@ -831,18 +785,12 @@ function showLogin() {
 
 function stopAutoSync() {
   clearInterval(S.timer);
-  clearInterval(S.syncTimer);
-  S.timer = S.syncTimer = null;
+  S.timer = null;
 }
 
 function startAutoSync() {
   stopAutoSync();
-  S.timer = setInterval(pollPulse, PULSE_INTERVAL_MS);   // one tiny query: shows mail the webhook already stored
-  if (S.cfg && S.cfg.resend_configured) {
-    // With the Resend webhook set up, mail arrives instantly and this is only a safety net.
-    const every = S.cfg.webhook_configured ? 10 * 60000 : SYNC_INTERVAL_MS;
-    S.syncTimer = setInterval(() => { if (!document.hidden) sync(true); }, every);
-  }
+  S.timer = setInterval(() => { if (!document.hidden) sync(true); }, SYNC_INTERVAL_MS);
 }
 
 async function doLogin() {
@@ -886,33 +834,249 @@ async function signOut() {
   showLogin();
 }
 
-async function start() {
-  let b;
-  try { b = await api(`/bootstrap?mailbox=${enc(S.box)}&folder=inbox`); }   // ONE request: mailboxes, counts, first page
-  catch (e) { session.clear(); showLogin(); $("#lErr").textContent = e.message; return; }
 
-  S.cfg = { domain: b.domain, user: b.user, mailboxes: b.mailboxes, resend_configured: b.resend_configured, webhook_configured: b.webhook_configured };
-  S.box = b.mailbox || S.box;
-  S.counts = b.counts || {}; S.drafts = b.drafts || {}; S.latest = b.latest || {};
-  $("#who").textContent = b.user;
-  const st = $("#status");
-  st.textContent = b.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
-  st.className = "status" + (b.resend_configured ? "" : " warn");
-
-  S.view = "inbox"; S.openId = null; S.openMsg = null; S.sel = new Set(); S.cur = -1;
-  S.items = b.items || []; S.hasMore = S.items.length === PAGE_SIZE; S.loading = false;
-  rememberBox();
-  renderNav(); renderBoxes();
-  $("#listTitle").textContent = TITLES.inbox;
-  readerPlaceholder();
-  renderRows();                                        // the first screen is now on display
-
-  startAutoSync();
-  loadBranding();                                      // after first paint, one request, cached by the CDN
-  if (b.resend_configured) setTimeout(() => sync(true), 4000);   // one catch-up sync once the screen is already usable
+// ---------------------------------------------------------------- mail lock & archive (administrators)
+const LK_ICON = { ok: "✓", warning: "!", fail: "✕" };
+const LK_TEXT = {
+  ok: "Locked: company mail is held only by this system.",
+  warning: "Almost locked: review the warnings below.",
+  fail: "Not locked: another mail server can still receive company mail.",
+};
+function closeLock() { const p = $("#lockPanel"); if (p) p.hidden = true; }
+function openLock(tab = "lock") {
+  const box = $("#lockPanel");
+  if (!box) return;
+  const body = h("div", {});
+  const tabs = h("div", { class: "lk-tabs" },
+    h("button", { type: "button", class: tab === "lock" ? "on" : "", onclick: () => openLock("lock") }, "Mail lock"),
+    h("button", { type: "button", class: tab === "archive" ? "on" : "", onclick: () => openLock("archive") }, "Archive"));
+  box.replaceChildren(h("div", { class: "card", role: "dialog", "aria-modal": "true", "aria-label": "Mail lock and archive" },
+    h("div", { class: "card-head" }, h("h2", {}, "Mail lock & archive"), iconBtn("close", "Close", closeLock)), tabs, body));
+  box.hidden = false;
+  if (tab === "lock") lockTab(body); else archiveTab(body);
+}
+function receivingTestBlock() {
+  const out = h("div", { class: "msg" });
+  const btn = h("button", { type: "button", class: "ghost" }, "Run receiving test");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true; out.textContent = "Sending a test mail to admin@ …";
+    try {
+      const { token } = await post("/receiving-test");
+      for (let i = 0; i < 12; i++) {
+        out.textContent = `Waiting for it to arrive… (${i + 1}/12)`;
+        await new Promise((r) => setTimeout(r, 4000));
+        const r = await api("/receiving-test?token=" + enc(token));
+        if (r.status === "received") { out.textContent = "✓ " + r.message; try { loadList(); } catch (_) {} btn.disabled = false; return; }
+        if (r.status !== "waiting") { out.textContent = "✕ " + r.message; btn.disabled = false; return; }
+      }
+      out.textContent = "✕ The test mail did not arrive. Your MX record probably does not point to Resend yet, or Receiving is off for the domain in Resend. See the first check above.";
+    } catch (e) { out.textContent = "✕ " + e.message; }
+    btn.disabled = false;
+  });
+  return h("div", { class: "lk-check ok" }, h("span", { class: "dot" }, "↻"),
+    h("div", {}, h("b", {}, "Receiving test"), h("div", {}, "Sends a message to admin@ and checks it comes back into this inbox. Run it if the inbox stays empty."), h("p", {}, btn), out));
+}
+async function lockTab(body, refresh = false) {
+  body.replaceChildren(h("p", {}, "Checking your domain's DNS…"));
+  try {
+    const r = await api("/compliance" + (refresh ? "?refresh=true" : ""));
+    body.replaceChildren(
+      h("div", { class: "lk-banner " + r.status }, LK_TEXT[r.status] || r.status),
+      r.checks.map((c) => h("div", { class: "lk-check " + c.status },
+        h("span", { class: "dot" }, LK_ICON[c.status] || "?"),
+        h("div", {}, h("b", {}, c.title), h("div", {}, c.detail)),
+        c.fix ? h("div", { class: "fix" }, "How to fix: " + c.fix) : null)),
+      h("p", {}, h("button", { type: "button", class: "ghost", onclick: () => lockTab(body, true) }, "Check again")),
+      receivingTestBlock());
+  } catch (e) { body.replaceChildren(h("p", {}, e.message)); }
+}
+function archiveTab(body) {
+  const list = h("div", {});
+  const detail = h("div", { class: "lk-msg" });
+  const q = h("input", { type: "search", placeholder: "Search the archive (sender, subject, text, recipient)", "aria-label": "Search archive" });
+  const sel = h("select", { "aria-label": "Mailbox" }, h("option", { value: "" }, "All mailboxes"),
+    S.cfg.mailboxes.map((m) => h("option", { value: m.id }, m.id)));
+  let t;
+  const load = async () => {
+    try {
+      const rows = await api("/archive?limit=100&q=" + enc(q.value) + "&mailbox=" + enc(sel.value));
+      list.replaceChildren(rows.length ? rows.map((m) => h("button", { type: "button", class: "lk-row", onclick: () => show(m.archive_id) },
+        h("b", {}, m.subject || "(no subject)"), m.in_mailbox ? null : h("span", { class: "lk-tag" }, "removed from mailbox"),
+        h("small", {}, `${m.direction === "inbound" ? "From" : "To/From"} ${m.from_name || m.from_address} · ${m.mailbox_address} · ${fmtShort(m.ts)}`),
+        h("small", {}, m.snippet))) : h("p", {}, "Nothing archived matches."));
+    } catch (e) { list.replaceChildren(h("p", {}, e.message)); }
+  };
+  const show = async (id) => {
+    try {
+      const m = await api("/archive/" + id);
+      const names = (a) => a.map((x) => x.email_address).join(", ") || "—";
+      let text = m.text_body || "";
+      if (!text && m.html_body) text = new DOMParser().parseFromString(m.html_body, "text/html").body.textContent.trim();
+      detail.replaceChildren(h("hr", {}), h("dl", {},
+        h("dt", {}, "From"), h("dd", {}, `${m.from_name ? m.from_name + " " : ""}<${m.from_address}>`),
+        h("dt", {}, "To"), h("dd", {}, names(m.to_addrs)), h("dt", {}, "Cc"), h("dd", {}, names(m.cc_addrs)),
+        m.bcc_addrs.length ? [h("dt", {}, "Bcc"), h("dd", {}, names(m.bcc_addrs))] : null,
+        h("dt", {}, "Subject"), h("dd", {}, m.subject || "(no subject)"),
+        h("dt", {}, "Date"), h("dd", {}, fmtShort(m.received_at || m.sent_at || m.archived_at)),
+        h("dt", {}, "Seal"), h("dd", {}, "SHA-256 " + m.content_sha256.slice(0, 16) + "…")),
+        h("pre", {}, text || "(no text content)"));
+      detail.scrollIntoView({ block: "nearest" });
+    } catch (e) { detail.replaceChildren(h("p", {}, e.message)); }
+  };
+  q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 250); });
+  sel.addEventListener("change", load);
+  body.replaceChildren(h("p", {}, "Every message ever received or sent is kept here permanently, even after it is deleted from a mailbox."),
+    h("div", { class: "lk-bar" }, q, sel), list, detail);
+  load();
 }
 
-function rememberBox() { try { localStorage.setItem("rtmail.box", S.box); } catch {} }
+
+// ---------------------------------------------------------------- templates & automation (administrators)
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+function closeAuto() { const p = $("#autoPanel"); if (p) p.hidden = true; }
+function openAuto(tab = "templates") {
+  const box = $("#autoPanel");
+  if (!box) return;
+  const body = h("div", {});
+  const tabBtn = (id, label) => h("button", { type: "button", class: tab === id ? "on" : "", onclick: () => openAuto(id) }, label);
+  box.replaceChildren(h("div", { class: "card", role: "dialog", "aria-modal": "true", "aria-label": "Templates and automation" },
+    h("div", { class: "card-head" }, h("h2", {}, "Templates & automation"), iconBtn("close", "Close", closeAuto)),
+    h("div", { class: "lk-tabs" }, tabBtn("templates", "Templates"), tabBtn("send", "Send to anyone"), tabBtn("outbox", "Sent automatically")), body));
+  box.hidden = false;
+  ({ templates: autoTemplates, send: autoSend, outbox: autoOutbox })[tab](body);
+}
+const AU_CATS = ["orders", "support", "account", "sales", "billing", "general"];
+
+async function autoTemplates(body, selected) {
+  body.replaceChildren(h("p", {}, "Loading…"));
+  let list;
+  try { list = await api("/templates"); } catch (e) { body.replaceChildren(h("p", {}, e.message)); return; }
+  const editor = h("div", {});
+  const listEl = h("div", { class: "au-list" },
+    h("button", { type: "button", onclick: () => edit(null) }, h("b", {}, "+ New template")),
+    list.map((t) => h("button", { type: "button", "data-k": t.template_key, onclick: () => edit(t.template_key) },
+      t.name, !t.is_active ? h("span", { class: "lk-tag" }, "off") : null, h("small", {}, `${t.category} · from ${t.mailbox_local_part}@ · sent ${t.sent_count}`))));
+  body.replaceChildren(h("p", { class: "au-help" }, "These mails are sent automatically for orders, support messages and new accounts, and you can send them to anyone from the next tab. Edit the wording here; the logo bar and footer are added for you."), h("div", { class: "au-grid" }, listEl, editor));
+
+  async function edit(key) {
+    listEl.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.k === key));
+    const t = key ? await api("/templates/" + enc(key)) : { template_key: "", name: "", category: "general", mailbox_local_part: "info", subject: "", body_html: "", body_text: "", is_active: true, variables: [], sample: {} };
+    const f = {};
+    const field = (id, label, el) => { f[id] = el; return h("label", {}, label, el); };
+    const sel = (opts, val) => { const s = h("select", {}, opts.map((o) => h("option", { value: o }, o))); s.value = val; return s; };
+    const out = h("div", {});
+    const frame = h("iframe", { class: "au-preview", sandbox: "", title: "Preview", hidden: "" });
+    const vars = (t.variables || []).map((v) => `{{${v.name}}}`).join("  ");
+    editor.replaceChildren(h("div", { class: "au-form" },
+      key ? null : field("key", "Key (letters, digits, underscore)", h("input", { value: "", maxlength: 60, placeholder: "e.g. festival_offer" })),
+      field("name", "Name", h("input", { value: t.name, maxlength: 120 })),
+      h("div", { class: "au-row" },
+        field("category", "Category", sel(AU_CATS, t.category)),
+        field("box", "Sent from", sel(S.cfg.mailboxes.map((m) => m.id), t.mailbox_local_part)),
+        h("label", { class: "lk-check-label" }, (f.active = h("input", { type: "checkbox" })), " Active (sends automatically)")),
+      field("subject", "Subject", h("input", { value: t.subject, maxlength: 300 })),
+      field("html", "Message (HTML)", h("textarea", { rows: 10 }, t.body_html)),
+      field("text", "Plain-text version", h("textarea", { rows: 6 }, t.body_text)),
+      h("div", { class: "au-help" }, "Placeholders: {{name}} text, {{{items_html}}} / {{{message_html}}} trusted blocks, {{#if name}}…{{/if}} optional parts.", vars ? h("div", {}, "This template can use: " + vars) : null),
+      h("div", { class: "au-row" },
+        h("button", { type: "button", class: "primary", onclick: save }, "Save"), h("button", { type: "button", class: "ghost", onclick: preview }, "Preview"),
+        key && !t.is_system ? h("button", { type: "button", class: "ghost", onclick: remove }, "Delete") : null, out), frame));
+    f.active.checked = !!t.is_active;
+    const data = () => ({ key: key || (f.key ? f.key.value.trim() : ""), name: f.name.value, category: f.category.value, mailbox_local_part: f.box.value,
+      subject: f.subject.value, body_html: f.html.value, body_text: f.text.value, is_active: f.active.checked, variables: t.variables });
+    async function preview() {
+      try {
+        const r = await api("/templates/" + enc(key || "welcome") + "/preview", { method: "POST", body: JSON.stringify({ subject: f.subject.value, body_html: f.html.value, body_text: f.text.value, variables: key ? {} : {} }) });
+        frame.hidden = false; frame.srcdoc = r.html;
+        out.textContent = (r.missing && r.missing.length) ? "Subject: " + r.subject + "  ·  No sample for: " + r.missing.join(", ") : "Subject: " + r.subject;
+      } catch (e) { out.textContent = e.message; }
+    }
+    async function save() {
+      try {
+        const d = data();
+        if (key) await api("/templates/" + enc(key), { method: "PUT", body: JSON.stringify(d) }); else await post("/templates", d);
+        toast("Template saved"); autoTemplates(body, key || d.key);
+      } catch (e) { out.textContent = e.message; }
+    }
+    async function remove() {
+      if (!confirm("Delete this template?")) return;
+      try { await api("/templates/" + enc(key), { method: "DELETE" }); toast("Template deleted"); autoTemplates(body); } catch (e) { out.textContent = e.message; }
+    }
+  }
+  if (selected) edit(selected);
+}
+
+async function autoSend(body) {
+  body.replaceChildren(h("p", {}, "Loading…"));
+  let list;
+  try { list = await api("/templates"); } catch (e) { body.replaceChildren(h("p", {}, e.message)); return; }
+  const usable = list.filter((t) => t.is_active && !["order_confirmation", "order_status_update", "order_review_request"].includes(t.template_key));
+  const pick = h("select", {}, usable.map((t) => h("option", { value: t.template_key }, t.name)));
+  const to = h("input", { type: "email", placeholder: "customer@example.com", maxlength: 320 });
+  const name = h("input", { placeholder: "Customer name", maxlength: 120 });
+  const fields = h("div", { class: "au-form" });
+  const out = h("div", { class: "msg" });
+  let current = {};
+  async function load() {
+    const t = await api("/templates/" + enc(pick.value));
+    current = {};
+    fields.replaceChildren(...(t.variables || []).filter((v) => !v.raw && v.name !== "customer_name" && !/^items_|_url$/.test(v.name)).map((v) => {
+      const long = v.name === "message";
+      const el = h(long ? "textarea" : "input", { rows: 5, placeholder: String(v.example || ""), maxlength: 4000 });
+      current[v.name] = el;
+      return h("label", {}, v.name.replace(/_/g, " "), el);
+    }));
+  }
+  pick.addEventListener("change", load);
+  const send = async () => {
+    out.textContent = "Sending…";
+    try {
+      const vars = {};
+      Object.entries(current).forEach(([k, el]) => { if (el.value.trim()) vars[k] = el.value.trim(); });
+      const r = await post("/templates/" + enc(pick.value) + "/send", { to: to.value.trim(), name: name.value.trim() || null, variables: vars });
+      out.textContent = r.status === "sent" ? "Sent. A copy is in the Sent folder." : `Not sent yet (${r.status}): ${r.last_error || "will retry automatically"}`;
+    } catch (e) { out.textContent = e.message; }
+  };
+  body.replaceChildren(h("div", { class: "au-form" }, h("p", { class: "au-help" }, "Pick a ready-made template, fill the blanks and send it to anyone. It leaves from the template's own address (sales@, billing@, info@…) and is kept in that mailbox."),
+    h("label", {}, "Template", pick), h("div", { class: "au-row" }, h("label", {}, "To", to), h("label", {}, "Name", name)), fields,
+    h("div", { class: "au-row" }, h("button", { type: "button", class: "primary", onclick: send }, "Send now"), out)));
+  if (usable.length) load();
+}
+
+async function autoOutbox(body) {
+  body.replaceChildren(h("p", {}, "Loading…"));
+  let rows;
+  try { rows = await api("/outbox?limit=100"); } catch (e) { body.replaceChildren(h("p", {}, e.message)); return; }
+  const out = h("span", { class: "msg" });
+  body.replaceChildren(
+    h("div", { class: "au-row" }, h("button", { type: "button", class: "ghost", onclick: async () => {
+      out.textContent = "Working…";
+      try { const r = await post("/outbox/run"); out.textContent = `Sent ${r.sent}, will retry ${r.retry}, failed ${r.failed}, waiting ${r.remaining}.`; setTimeout(() => autoOutbox(body), 1200); } catch (e) { out.textContent = e.message; }
+    } }, "Send waiting mail now"), out),
+    rows.length ? h("table", { class: "au-table" }, h("tr", {}, ["When", "Template", "To", "Status", ""].map((x) => h("th", {}, x))),
+      rows.map((r) => h("tr", {}, h("td", {}, fmtShort(r.sent_at || r.created_at)), h("td", {}, r.template_key), h("td", {}, r.to_email),
+        h("td", {}, h("span", { class: "au-pill " + r.status }, r.status), r.last_error ? h("div", { class: "au-err" }, r.last_error) : null),
+        h("td", {}, r.status === "failed" ? h("button", { type: "button", class: "ghost small", onclick: async () => { try { await post(`/outbox/${r.outbox_id}/retry`); toast("Retrying…"); autoOutbox(body); } catch (e) { toast(e.message, true); } } }, "Retry") : null))))
+      : h("p", {}, "Nothing has been sent automatically yet. Mail appears here when an order is placed, an order status changes, a customer registers or writes to support."));
+}
+
+async function start() {
+  try { S.cfg = await api("/config"); }
+  catch (e) { session.clear(); showLogin(); $("#lErr").textContent = e.message; return; }
+
+  if (!S.cfg.mailboxes.some((m) => m.id === S.box)) S.box = S.cfg.mailboxes[0]?.id || "admin";
+  $("#who").textContent = S.cfg.user;
+  { const lb = $("#lockBtn"); if (lb) lb.hidden = !S.cfg.is_admin; const ab = $("#autoBtn"); if (ab) ab.hidden = !S.cfg.is_admin; }
+  const st = $("#status");
+  st.textContent = S.cfg.resend_configured ? "Resend connected" : "RESEND_API_KEY is not set on the server.";
+  st.className = "status" + (S.cfg.resend_configured ? "" : " warn");
+  await refreshCounts();
+  setView("inbox");
+  if (S.cfg.resend_configured) {
+    sync(true);
+    startAutoSync();
+  }
+}
 
 // ---------------------------------------------------------------- keyboard shortcuts
 const SHORTCUTS = [
@@ -958,6 +1122,8 @@ function onKey(e) {
   }
   if (!S.cfg || !$("#login").hidden) return;
   if (!$("#help").hidden) { if (e.key === "Escape" || e.key === "?") toggleHelp(false); return; }
+  if ($("#lockPanel") && !$("#lockPanel").hidden) { if (e.key === "Escape") closeLock(); return; }
+  if ($("#autoPanel") && !$("#autoPanel").hidden) { if (e.key === "Escape") closeAuto(); return; }
   const k = e.key;
   if (gPending) {
     gPending = false;
@@ -991,6 +1157,8 @@ function onKey(e) {
 }
 
 (function init() {
+  applyCompanyBrand();
+  applyDbTheme();
   document.querySelectorAll("[data-icon]").forEach((el) => { el.innerHTML = svg(el.dataset.icon); });
   $("#composeBtn").addEventListener("click", () => S.cfg && setView("compose"));
   document.querySelectorAll(".nav button").forEach((b) => b.addEventListener("click", () => S.cfg && setView(b.dataset.view)));
@@ -999,6 +1167,10 @@ function onKey(e) {
   $("#signOutBtn").addEventListener("click", signOut);
   $("#helpBtn").addEventListener("click", () => toggleHelp(true));
   $("#help").addEventListener("click", (e) => { if (e.target.id === "help") toggleHelp(false); });
+  if ($("#lockPanel")) $("#lockPanel").addEventListener("click", (e) => { if (e.target.id === "lockPanel") closeLock(); });
+  if ($("#lockBtn")) $("#lockBtn").addEventListener("click", () => openLock("lock"));
+  if ($("#autoPanel")) $("#autoPanel").addEventListener("click", (e) => { if (e.target.id === "autoPanel") closeAuto(); });
+  if ($("#autoBtn")) $("#autoBtn").addEventListener("click", () => openAuto("templates"));
   $("#lBtn").addEventListener("click", doLogin);
   $("#lPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("#lEmail").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#lPass").focus(); });
@@ -1010,7 +1182,7 @@ function onKey(e) {
     t = setTimeout(() => { S.q = e.target.value; if (S.cfg && S.view !== "compose") { S.sel = new Set(); loadList(); } }, 250);
   });
   // Catch up immediately when the tab becomes visible again after being in the background.
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.cfg) pollPulse(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.cfg && S.timer) sync(true); });
   // Never lose typing: warn on tab close with unsaved edits, and save when the tab is hidden.
   window.addEventListener("beforeunload", (e) => {
     if (S.compose && S.compose.dirty && !S.compose.closed) { e.preventDefault(); e.returnValue = ""; }
@@ -1020,5 +1192,5 @@ function onKey(e) {
   });
   readerPlaceholder();
   renderToolbar();
-  if (session.get()) start(); else { showLogin(); loadBranding(); }
+  if (session.get()) start(); else showLogin();
 })();

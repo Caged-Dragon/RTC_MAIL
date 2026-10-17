@@ -7,8 +7,7 @@
   <meta name="description" content="RT Crackers business webmail">
   <meta name="robots" content="noindex, nofollow">
   <title>RT Crackers Mail</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23d8372b'/%3E%3Cpath d='M14 20h36v24H14z' fill='none' stroke='white' stroke-width='4' stroke-linejoin='round'/%3E%3Cpath d='M14 22l18 14 18-14' fill='none' stroke='white' stroke-width='4' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=4">
 </head>
 <body>
   <noscript><p style="padding:24px;font-family:sans-serif">RT Crackers Mail needs JavaScript to run.</p></noscript>
@@ -24,10 +23,12 @@
         <button type="button" data-view="trash"><span class="ic" data-icon="trash"></span><span class="lbl">Trash</span></button>
       </nav>
       <div class="side-label">Mailboxes</div>
-      <div class="boxes" id="boxes" role="tablist" aria-label="Mailboxes"><div class="skel skel-box"></div><div class="skel skel-box"></div><div class="skel skel-box"></div><div class="skel skel-box"></div></div>
+      <div class="boxes" id="boxes" role="tablist" aria-label="Mailboxes"></div>
       <div class="side-foot">
         <button type="button" class="ghost" id="syncBtn">Sync inbox</button>
         <button type="button" class="ghost small" id="fullSyncBtn">Import older mail</button>
+        <button type="button" class="ghost small" id="autoBtn" hidden>Templates &amp; automation</button>
+        <button type="button" class="ghost small" id="lockBtn" hidden>Mail lock &amp; archive</button>
         <button type="button" class="link small-link" id="helpBtn">Keyboard shortcuts (?)</button>
         <div class="status" id="status" role="status"></div>
         <div class="who"><span id="who"></span><button type="button" class="link" id="signOutBtn">Sign out</button></div>
@@ -42,13 +43,15 @@
         </label>
       </header>
       <div class="toolbar" id="toolbar" role="toolbar" aria-label="Message actions"></div>
-      <div class="rows" id="rows" aria-busy="true"><div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+      <div class="rows" id="rows"></div>
     </section>
 
     <section class="reader" id="readerPane" data-rtc-component="reader"></section>
   </div>
 
   <div class="overlay" id="help" hidden></div>
+  <div class="overlay" id="lockPanel" hidden></div>
+  <div class="overlay" id="autoPanel" hidden></div>
 
   <div class="login" id="login" hidden data-rtc-component="login_card">
     <div class="login-card">
@@ -63,6 +66,6 @@
   </div>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

@@ -52,98 +52,45 @@ def as_list(value) -> list:
     return [value] if isinstance(value, str) else list(value)
 
 
-# Mailboxes change very rarely, but almost every request needs them. Re-reading them from the database on each
-# request cost a connection (and a join) every time, so they are kept in memory for a short while.
-MAILBOX_CACHE_TTL = 120.0   # seconds
-ENSURE_TTL = 600.0          # seconds between checks for newly added business addresses
-_cache_lock = threading.Lock()
-_mb_cache: dict = {"at": 0.0, "rows": None}
-_ensure_state: dict = {"at": None}
+def ensure_mailboxes() -> None:
+    with conn() as c:
+        c.execute(
+            """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
+               select b.business_email_id,
+                      (select min(business_id) from mailboxes),
+                      lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
+                      case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
+                           when 'support' then 'support' when 'billing' then 'billing'
+                           when 'orders' then 'operations' else 'general' end::mailbox_type
+               from business_email_addresses b
+               join business_email_purposes p using (email_purpose_id)
+               where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
+                 and not exists (select 1 from mailboxes m where m.business_email_id = b.business_email_id)
+                 and not exists (select 1 from mailboxes m where m.email_address = lower(b.email_address))
+                 and (select min(business_id) from mailboxes) is not null
+               on conflict do nothing""",
+            (config.MAIL_DOMAIN,),
+        )
 
 
-def clear_caches() -> None:
-    with _cache_lock:
-        _mb_cache.update(at=0.0, rows=None)
-        _ensure_state["at"] = None
-
-
-def _insert_missing_mailboxes(c) -> None:
-    """Ensure each active address on MAIL_DOMAIN has a mailbox row, on an existing connection."""
-    c.execute(
-        """insert into mailboxes (business_email_id, business_id, email_address, local_part, display_name, mailbox_type)
-           select b.business_email_id,
-                  coalesce((select min(business_id) from mailboxes), 1),
-                  lower(b.email_address), lower(split_part(b.email_address, '@', 1)), b.display_name,
-                  case p.purpose_code when 'admin' then 'admin' when 'sales' then 'sales'
-                       when 'support' then 'support' when 'billing' then 'billing'
-                       when 'orders' then 'operations' else 'general' end::mailbox_type
-           from business_email_addresses b
-           join business_email_purposes p using (email_purpose_id)
-           where b.is_active and lower(split_part(b.email_address, '@', 2)) = %s
-             and not exists (select 1 from mailboxes m where m.business_email_id = b.business_email_id)
-             and not exists (select 1 from mailboxes m where m.email_address = lower(b.email_address))
-           on conflict do nothing""",
-        (config.MAIL_DOMAIN,),
-    )
-
-
-def ensure_mailboxes(force: bool = False, c=None) -> None:
-    """Create missing mailbox rows periodically; reuse an existing connection when one is available."""
-    now = time.monotonic()
-    with _cache_lock:
-        last = _ensure_state["at"]
-    if not force and last is not None and now - last < ENSURE_TTL:
-        return
-
-    if c is None:
-        with conn() as database:
-            _insert_missing_mailboxes(database)
-    else:
-        _insert_missing_mailboxes(c)
-
-    with _cache_lock:
-        _ensure_state["at"] = now
-        # We may have inserted mailboxes, so do not serve a possibly stale mailbox cache.
-        _mb_cache.update(at=0.0, rows=None)
-
-
-def _fetch_mailboxes(c=None) -> list[dict]:
-    """Fetch the active domain mailboxes on a supplied connection or a short-lived connection."""
-    sql = """select distinct on (m.email_address)
+def list_mailboxes(user=None) -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            """select distinct on (m.email_address)
                       m.mailbox_id, m.local_part, m.email_address as address,
                       coalesce(nullif(m.display_name, ''), b.display_name, m.local_part) as label,
                       m.is_receiving_enabled, m.is_sending_enabled
                from mailboxes m
                join business_email_addresses b on b.business_email_id = m.business_email_id and b.is_active
-               where m.is_active and lower(split_part(m.email_address, '@', 2)) = %s
-               order by m.email_address, m.mailbox_id"""
-    if c is None:
-        with conn() as database:
-            rows = database.execute(sql, (config.MAIL_DOMAIN,)).fetchall()
-    else:
-        rows = c.execute(sql, (config.MAIL_DOMAIN,)).fetchall()
-    # Known local-parts may be placed first for continuity, but this is only a sort preference.
-    # Addresses outside MAILBOX_ORDER are still returned and routed normally.
-    priority = {local: i for i, local in enumerate(config.MAILBOX_ORDER)}
-    rows.sort(key=lambda r: (priority.get(r["local_part"], len(priority)), r["local_part"]))
-    return rows
-
-
-def _visible_mailboxes(rows: list[dict], user=None) -> list[dict]:
+               where m.is_active and m.email_address like %s and m.local_part = any(%s)
+               order by m.email_address, m.mailbox_id""",
+            ("%@" + config.MAIL_DOMAIN, config.REQUIRED_LOCALS),
+        ).fetchall()
+    req = {n: i for i, n in enumerate(config.REQUIRED_LOCALS)}
+    rows.sort(key=lambda r: (req.get(r["local_part"], 99), r["local_part"]))
     if user is not None and not user.is_admin:
         rows = [r for r in rows if r["mailbox_id"] in user.mailbox_ids]
-    return [dict(r) for r in rows]
-
-
-def list_mailboxes(user=None) -> list[dict]:
-    now = time.monotonic()
-    with _cache_lock:
-        rows = _mb_cache["rows"] if _mb_cache["rows"] is not None and now - _mb_cache["at"] < MAILBOX_CACHE_TTL else None
-    if rows is None:
-        rows = _fetch_mailboxes()
-        with _cache_lock:
-            _mb_cache.update(at=now, rows=rows)
-    return _visible_mailboxes(rows, user)
+    return rows
 
 
 def _box_by_local(local: str, user, sending=False) -> dict:
@@ -160,15 +107,30 @@ def _addr(raw: str) -> tuple[str, str]:
     return name, a.strip().lower()
 
 
-def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = None) -> dict:
+def _is_company_mail(item: dict) -> bool:
+    """True if any recipient is on the company domain (and the mail is therefore ours to keep)."""
+    suffix = "@" + config.MAIL_DOMAIN
+    return any(
+        _addr(raw)[1].endswith(suffix)
+        for key in ("to", "cc", "bcc")
+        for raw in as_list(item.get(key))
+    )
+
+
+def _catch_all_box(boxes: dict) -> dict | None:
+    """The mailbox that receives mail for unknown company addresses: admin@, else the first receiving mailbox."""
+    for b in boxes.values():
+        if b["local_part"] == "admin":
+            return b
+    return next(iter(boxes.values()), None)
+
+
+def ingest_received(item: dict, boxes: dict | None = None) -> dict:
     rid = item.get("id")
     result = {"new": 0, "known": False, "failed": 0, "ours": False}
     if not rid:
         return result
     if boxes is None:
-        # A receiving webhook may be the first request after deploy. Discover mailbox rows here
-        # rather than depending on an authenticated page load or the periodic sync to create them.
-        ensure_mailboxes()
         boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
 
     targets = []
@@ -178,14 +140,25 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
             if box and box not in targets:
                 targets.append(box)
 
+    if not targets and _is_company_mail(item):
+        # Resend delivers EVERY address at the domain. Mail for an address that has no mailbox (typo, retired
+        # alias, random@...) must still be kept here, never left only with the provider: file it in the catch-all.
+        catch_all = _catch_all_box(boxes)
+        if catch_all:
+            targets = [catch_all]
+            result["catch_all"] = True
+
     result["ours"] = bool(targets)
     if not targets:
         return result
 
-    if known is None:
-        known = _load_known([rid])
-    stored, _legacy_base_used = known.get(rid, (set(), False))
-    stored = set(stored)
+    with conn() as c:
+        have = c.execute(
+            "select mailbox_id, resend_email_id from email_messages where resend_email_id = %s or resend_email_id like %s",
+            (rid, rid + "#%"),
+        ).fetchall()
+    stored = {r["mailbox_id"] for r in have}
+    base_used = any(r["resend_email_id"] == rid for r in have)
 
     full = None
     for box in targets:
@@ -204,10 +177,7 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
         name, from_addr = parseaddr(full.get("from") or "")
         text, html = full.get("text") or "", full.get("html") or ""
         when = norm_ts(full.get("created_at"))
-        # Use a deterministic per-mailbox provider id. This remains safe if two identical webhook
-        # deliveries are processed concurrently: every mailbox has its own unique id, rather than
-        # racing to claim a shared unsuffixed id for the first recipient.
-        stored_id = f"{rid}#{box['mailbox_id']}"
+        stored_id = rid if not base_used else f"{rid}#{box['mailbox_id']}"
         with conn() as c:
             row = c.execute(
                 """insert into email_messages
@@ -220,38 +190,22 @@ def ingest_received(item: dict, boxes: dict | None = None, known: dict | None = 
                  make_snippet(text, html), text, html, when, stored_id),
             ).fetchone()
             if row:
+                base_used = True
                 result["new"] += 1
                 _insert_recipients(c, row["email_message_id"], full)
-            else:
-                # A concurrent webhook may have inserted this mailbox copy after _load_known().
-                result["known"] = True
+        if row:
+            _after_inbound(box, full, from_addr, name, row["email_message_id"])
     return result
 
 
-def _load_known(rids: list[str]) -> dict:
-    """Which of these Resend emails are already stored, and for which mailboxes? One query for any number of ids.
+def _after_inbound(box: dict, full: dict, from_addr: str, name: str, message_id: int) -> None:
+    """Event hook: a new message was stored. Never lets an automation problem affect receiving mail."""
+    try:
+        from . import automation
 
-    Returns {resend_id: (set_of_mailbox_ids, legacy_base_id_is_used)}. New inbound messages use a deterministic
-    <id>#<mailbox_id> key for each mailbox. The unsuffixed form is still recognized for messages stored by older
-    versions so webhook retries do not duplicate historical mail.
-    """
-    rids = [r for r in rids if r]
-    if not rids:
-        return {}
-    with conn() as c:
-        rows = c.execute(
-            "select mailbox_id, resend_email_id from email_messages where direction = 'inbound' "
-            "and split_part(resend_email_id, '#', 1) = any(%s)",
-            (rids,),
-        ).fetchall()
-    out: dict = {}
-    for r in rows:
-        stored_id = r["resend_email_id"]
-        base = stored_id.split("#", 1)[0]
-        mailboxes, used = out.get(base, (set(), False))
-        mailboxes.add(r["mailbox_id"])
-        out[base] = (mailboxes, used or stored_id == base)
-    return out
+        automation.maybe_auto_reply(box, full, from_addr, name, message_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Auto-reply step failed for message %s", message_id)
 
 
 def _insert_recipients(c, message_id: int, full: dict) -> None:
@@ -271,7 +225,7 @@ def sync_inbox(max_pages: int = 5, full_scan: bool = False) -> dict:
     if not _sync_lock.acquire(blocking=False):
         return {"new": 0, "failed": 0, "partial": False, "busy": True}
     try:
-        ensure_mailboxes(force=full_scan)
+        ensure_mailboxes()
         boxes = {r["address"]: r for r in list_mailboxes() if r["is_receiving_enabled"]}
         deadline = time.monotonic() + config.SYNC_BUDGET_SECONDS
         new = failed = 0
@@ -281,12 +235,11 @@ def sync_inbox(max_pages: int = 5, full_scan: bool = False) -> dict:
             page = resend_client.list_received(limit=100, after=after)
             items = page.get("data") or []
             page_new = 0
-            known = _load_known([it.get("id") for it in items])   # one query for the whole page, not one per email
             for item in items:
                 if time.monotonic() > deadline:
                     partial = True
                     break
-                r = ingest_received(item, boxes, known)
+                r = ingest_received(item, boxes)
                 new += r["new"]
                 failed += r["failed"]
                 page_new += r["new"] + r["failed"]
@@ -302,20 +255,16 @@ def _like(q: str) -> str:
     return "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def _counts(c, ids: list[int]) -> dict:
-    rows = c.execute(
-        """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
-           where m.folder='inbox' and not m.is_read and m.deleted_at is null and m.mailbox_id = any(%s)
-           group by mb.local_part""",
-        (ids,),
-    ).fetchall()
-    return {r["local_part"]: r["n"] for r in rows}
-
-
 def counts(user) -> dict:
     ids = [r["mailbox_id"] for r in list_mailboxes(user)]
     with conn() as c:
-        return _counts(c, ids)
+        rows = c.execute(
+            """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
+               where m.folder='inbox' and not m.is_read and m.deleted_at is null and m.mailbox_id = any(%s)
+               group by mb.local_part""",
+            (ids,),
+        ).fetchall()
+    return {r["local_part"]: r["n"] for r in rows}
 
 
 _SEARCH_OP_RE = re.compile(r'\b(from|to|subject|is):("[^"]*"|\S+)', re.I)
@@ -329,8 +278,9 @@ def parse_search(q: str) -> tuple[str, list[tuple[str, str]]]:
     return _SEARCH_OP_RE.sub(" ", q or "").strip(), ops
 
 
-def _list_messages(c, box: dict, local: str, folder: str, q: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+def list_messages(user, local: str, folder: str, q: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
     """Messages of one mailbox. `folder` is inbox | sent | drafts, or the virtual views starred | trash."""
+    box = _box_by_local(local, user)
     limit = max(1, min(int(limit), MAX_PAGE))
     offset = max(0, int(offset))
     # Drafts have no received/sent time (show last edit); trash orders by when it was deleted.
@@ -383,13 +333,8 @@ def _list_messages(c, box: dict, local: str, folder: str, q: str = "", limit: in
         args += [_like(text)] * 5
     sql += f" order by {ts} desc, m.email_message_id desc limit %s offset %s"
     args += [limit, offset]
-    return c.execute(sql, args).fetchall()
-
-
-def list_messages(user, local: str, folder: str, q: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
-    box = _box_by_local(local, user)
     with conn() as c:
-        return _list_messages(c, box, local, folder, q, limit, offset)
+        return c.execute(sql, args).fetchall()
 
 
 def get_message(user, msg_id: int) -> dict | None:
@@ -406,13 +351,12 @@ def get_message(user, msg_id: int) -> dict | None:
         ).fetchone()
         if not row or row["mailbox_id"] not in allowed:
             return None
-        recipients = c.execute(
-            "select recipient_type::text as kind, email_address from email_recipients"
-            " where email_message_id = %s order by email_recipient_id",
-            (msg_id,),
-        ).fetchall()
         for kind in ("to", "cc", "bcc"):
-            row[kind + "_addrs"] = [r["email_address"] for r in recipients if r["kind"] == kind]
+            row[kind + "_addrs"] = [r["email_address"] for r in c.execute(
+                "select email_address from email_recipients where email_message_id=%s and recipient_type=%s::mail_recipient_type"
+                " order by email_recipient_id",
+                (msg_id, kind),
+            ).fetchall()]
         if row["folder"] == "inbox" and not row["is_read"] and not row["deleted"]:
             c.execute("update email_messages set is_read=true, updated_at=now() where email_message_id=%s", (msg_id,))
             row["is_read"] = True
@@ -626,19 +570,15 @@ def delete_draft(user, draft_id: int) -> bool:
     return bool(row)
 
 
-def _draft_counts(c, ids: list[int]) -> dict:
-    rows = c.execute(
-        """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
-           where m.folder = 'drafts' and m.deleted_at is null and m.mailbox_id = any(%s)
-           group by mb.local_part""",
-        (ids,),
-    ).fetchall()
-    return {r["local_part"]: r["n"] for r in rows}
-
-
 def draft_counts(user) -> dict:
     with conn() as c:
-        return _draft_counts(c, _accessible_ids(user))
+        rows = c.execute(
+            """select mb.local_part, count(*) as n from email_messages m join mailboxes mb using (mailbox_id)
+               where m.folder = 'drafts' and m.deleted_at is null and m.mailbox_id = any(%s)
+               group by mb.local_part""",
+            (_accessible_ids(user),),
+        ).fetchall()
+    return {r["local_part"]: r["n"] for r in rows}
 
 
 # --- Gmail-style message actions (stars, trash, read state) --------------------------------------
@@ -709,52 +649,78 @@ def apply_delivery_event(event_type: str, resend_email_id: str | None, event_id:
     return len(rows)
 
 
-# --- Fast first screen and cheap "anything new?" checks ------------------------------------------------
-
-def _pulse(c, ids: list[int]) -> dict:
-    """Unread counts, draft counts and latest inbox ids in one query on an existing connection."""
-    if not ids:
-        return {"counts": {}, "latest": {}, "drafts": {}}
-    rows = c.execute(
-        """select mb.local_part,
-                  count(*) filter (where m.folder = 'inbox' and m.deleted_at is null and not m.is_read) as unread,
-                  max(m.email_message_id) filter (where m.folder = 'inbox' and m.deleted_at is null) as latest,
-                  count(*) filter (where m.folder = 'drafts' and m.deleted_at is null) as drafts
-           from mailboxes mb
-           left join email_messages m on m.mailbox_id = mb.mailbox_id
-           where mb.mailbox_id = any(%s)
-           group by mb.local_part""",
-        (ids,),
-    ).fetchall()
-    return {
-        "counts": {r["local_part"]: r["unread"] for r in rows if r["unread"]},
-        "latest": {r["local_part"]: r["latest"] for r in rows if r["latest"] is not None},
-        "drafts": {r["local_part"]: r["drafts"] for r in rows if r["drafts"]},
-    }
+# --- Mail lock: append-only archive and compliance report -------------------------------------------
+_COMPLIANCE_TTL = 300
+_compliance_cache: dict = {"at": 0.0, "data": None}
 
 
-def pulse(user) -> dict:
-    ids = _accessible_ids(user)
+def archive_search(q: str = "", mailbox: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    """Admin-only. Lists the append-only archive (it still holds mail deleted from the mailboxes)."""
+    sql = """select a.archive_id, a.email_message_id, a.mailbox_address, a.direction, a.from_address, a.from_name, a.subject,
+                    coalesce(a.received_at, a.sent_at, a.archived_at) as ts,
+                    left(coalesce(a.text_body, ''), 160) as snippet,
+                    exists (select 1 from email_messages m where m.email_message_id = a.email_message_id and m.deleted_at is null) as in_mailbox
+             from mail_archive a where true"""
+    args: list = []
+    if mailbox:
+        sql += " and a.mailbox_address = %s"
+        args.append(f"{mailbox.lower()}@{config.MAIL_DOMAIN}")
+    q = (q or "").strip()
+    if q:
+        sql += """ and (a.subject ilike %s or a.from_address ilike %s or a.from_name ilike %s or a.text_body ilike %s
+                   or exists (select 1 from mail_archive_recipients r where r.email_message_id = a.email_message_id and r.email_address ilike %s))"""
+        args += [_like(q)] * 5
+    sql += " order by ts desc, a.archive_id desc limit %s offset %s"
+    args += [min(max(int(limit), 1), MAX_PAGE), max(int(offset), 0)]
     with conn() as c:
-        return _pulse(c, ids)
+        return c.execute(sql, args).fetchall()
 
 
-def bootstrap(user, local: str | None = None, folder: str = "inbox", limit: int = 50) -> dict:
-    """Load the first screen with one database connection, including on a cold serverless start."""
+def archive_get(archive_id: int) -> dict | None:
+    with conn() as c:
+        row = c.execute("select * from mail_archive where archive_id = %s", (archive_id,)).fetchone()
+        if not row:
+            return None
+        rec = c.execute(
+            "select recipient_type, email_address, display_name from mail_archive_recipients where email_message_id = %s order by archive_recipient_id",
+            (row["email_message_id"],),
+        ).fetchall()
+    row["to_addrs"] = [r for r in rec if r["recipient_type"] == "to"]
+    row["cc_addrs"] = [r for r in rec if r["recipient_type"] == "cc"]
+    row["bcc_addrs"] = [r for r in rec if r["recipient_type"] == "bcc"]
+    return row
+
+
+def compliance_report(force: bool = False) -> dict:
+    """DNS 'mail lock' check plus what this application itself guarantees. Cached for five minutes."""
+    from . import compliance
+
     now = time.monotonic()
+    if not force and _compliance_cache["data"] and now - _compliance_cache["at"] < _COMPLIANCE_TTL:
+        return _compliance_cache["data"]
+    try:
+        dns = compliance.fetch_dns(config.MAIL_DOMAIN)
+        report = compliance.evaluate(config.MAIL_DOMAIN, dns["mx"], dns["spf"], dns["dmarc"], dns["dkim"], config.ALLOWED_MX)
+    except Exception as exc:  # network/DNS problem: say so instead of pretending everything is fine
+        log.warning("DNS check failed: %s", exc)
+        report = {"domain": config.MAIL_DOMAIN, "status": "warning", "mx": [], "checked_at": int(time.time()),
+                  "checks": [compliance._check("dns", "DNS look-up", "warning", "Could not read DNS right now. Try again in a minute.")]}
+
     with conn() as c:
-        # Previously a cold start could open one connection to ensure mailbox rows, another to
-        # discover mailboxes, and a third to load the first page. Reuse this request's connection.
-        ensure_mailboxes(c=c)
-        with _cache_lock:
-            rows = _mb_cache["rows"] if _mb_cache["rows"] is not None and now - _mb_cache["at"] < MAILBOX_CACHE_TTL else None
-        if rows is None:
-            rows = _fetch_mailboxes(c)
-            with _cache_lock:
-                _mb_cache.update(at=now, rows=rows)
-        boxes = _visible_mailboxes(rows, user)
-        chosen = next((b for b in boxes if b["local_part"] == local), None) or (boxes[0] if boxes else None)
-        ids = [b["mailbox_id"] for b in boxes]
-        data = _pulse(c, ids)
-        items = _list_messages(c, chosen, chosen["local_part"], folder, "", limit, 0) if chosen else []
-    return {"boxes": boxes, "mailbox": chosen["local_part"] if chosen else "", "items": items, **data}
+        off = c.execute("select count(*) n from mailboxes where email_address not like %s", ("%@" + config.MAIL_DOMAIN,)).fetchone()["n"]
+        arch = c.execute("select count(*) n, max(archived_at) last from mail_archive").fetchone()
+        live = c.execute("select count(*) n from email_messages where status <> 'draft'").fetchone()["n"]
+    app = report["checks"]
+    app.append(compliance._check("mailboxes", "Mailboxes only on your domain", "ok" if off == 0 else "fail",
+                                 "Every mailbox is an @" + config.MAIL_DOMAIN + " address." if off == 0 else f"{off} mailbox(es) use another domain."))
+    app.append(compliance._check("catchall", "Unknown addresses", "ok",
+                                 "Mail to any other @" + config.MAIL_DOMAIN + " address is kept in the admin mailbox, not lost."))
+    app.append(compliance._check("archive", "Permanent archive", "ok" if arch["n"] >= live else "warning",
+                                 f"{arch['n']} messages archived (append-only; survives deleting from a mailbox)."))
+    app.append(compliance._check("resend", "Receiving connected", "ok" if config.RESEND_API_KEY and config.RESEND_WEBHOOK_SECRET else "warning",
+                                 "Resend key and webhook secret are set." if config.RESEND_API_KEY and config.RESEND_WEBHOOK_SECRET
+                                 else "RESEND_API_KEY and/or RESEND_WEBHOOK_SECRET is missing on the server."))
+    order = {"fail": 2, "warning": 1, "ok": 0}
+    report["status"] = max((c["status"] for c in app), key=lambda s: order[s])
+    _compliance_cache.update(at=now, data=report)
+    return report

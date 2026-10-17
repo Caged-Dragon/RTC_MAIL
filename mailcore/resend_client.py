@@ -54,6 +54,7 @@ def _call(method: str, path: str, **kwargs) -> dict:
     if not config.RESEND_API_KEY:
         raise ResendError(400, "RESEND_API_KEY is not set. Add it to your .env file and restart.")
     headers = {"Authorization": f"Bearer {config.RESEND_API_KEY}", "User-Agent": "rtcrackers-mail/1.0"}
+    headers.update(kwargs.pop("headers", None) or {})
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         _wait_for_slot()
@@ -76,8 +77,9 @@ def _call(method: str, path: str, **kwargs) -> dict:
     raise ResendError(429, "Resend rate limit exceeded")  # pragma: no cover - loop always returns/raises
 
 
-def send(payload: dict) -> dict:
-    return _call("POST", "/emails", json=payload)
+def send(payload: dict, idempotency_key: str | None = None) -> dict:
+    """`idempotency_key` makes Resend ignore a repeated request, so a retry can never deliver the same mail twice."""
+    return _call("POST", "/emails", json=payload, headers={"Idempotency-Key": idempotency_key} if idempotency_key else None)
 
 
 def list_received(limit: int = 100, after: str | None = None) -> dict:

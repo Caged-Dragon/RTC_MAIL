@@ -20,7 +20,7 @@ const MAIL = [
 ];
 for (let i = 0; i < 120; i++) MAIL.push(mk(2000 + i, "info", "Bulk " + i, { is_read: true }));
 
-const cfg = { domain: "x", user: "admin@rtcrackers.com", resend_configured: true,
+const cfg = { domain: "x", user: "admin@rtcrackers.com", resend_configured: false,
   mailboxes: ["admin", "sales", "info"].map((id) => ({ id, label: id, address: id + "@rtcrackers.com", can_send: true })) };
 const json = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
 const asList = (m) => ({ ...m, to_addrs: m.to_addrs || [] });
@@ -44,31 +44,12 @@ function listFor(q) {
   return rows.slice(off, off + lim).map(asList);
 }
 
-function pulseData() {
-  const counts = {}, latest = {}, drafts = {};
-  MAIL.filter((m) => !m.deleted).forEach((m) => {
-    if (!m.is_read) counts[m.mailbox] = (counts[m.mailbox] || 0) + 1;
-    latest[m.mailbox] = Math.max(latest[m.mailbox] || 0, m.id);
-  });
-  db.drafts.forEach((d) => (drafts[d.mailbox] = (drafts[d.mailbox] || 0) + 1));
-  return { counts, drafts, latest };
-}
-
 async function fakeFetch(url, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
   const body = opts.body ? JSON.parse(opts.body) : null;
   db.calls.push(method + " " + url);
   if (url === "/api/company" || url === "/api/theme") return json({});
-  if (url === "/api/branding") return json({ theme: { components: [] }, company: {} });
   if (url === "/api/config") return json(cfg);
-  if (url === "/api/pulse") return json(pulseData());
-  if (url.startsWith("/api/bootstrap?")) {
-    const q = new URL("http://x" + url.slice(4)).searchParams;
-    const box = cfg.mailboxes.some((m) => m.id === q.get("mailbox")) ? q.get("mailbox") : cfg.mailboxes[0].id;
-    const items = listFor(new URLSearchParams({ mailbox: box, folder: q.get("folder") || "inbox", limit: "50", offset: "0", q: "" }));
-    return json({ ...cfg, user: cfg.user, mailbox: box, folder: q.get("folder") || "inbox", webhook_configured: true, ...pulseData(), items });
-  }
-  if (url === "/api/sync" && method === "POST") return json({ new: 0, failed: 0, partial: false });
   if (url === "/api/counts") {
     const o = {}; MAIL.filter((m) => !m.is_read && !m.deleted).forEach((m) => (o[m.mailbox] = (o[m.mailbox] || 0) + 1)); return json(o);
   }
@@ -143,18 +124,9 @@ const check = (name, cond) => { console.log((cond ? "PASS " : "FAIL ") + name); 
   const ids = () => $$("#rows .row").map((r) => +r.dataset.id);
   const tbBtn = (label) => $$("#toolbar button").find((b) => b.getAttribute("aria-label") === label);
   const gotoBox = async (id) => { clickEl($$("#boxes .box").find((b) => b.textContent.startsWith(id))); await sleep(150); };
-  const badge = (id) => { const b = $$("#boxes .box").find((x) => x.textContent.startsWith(id)); const n = b && b.querySelector(".badge"); return n ? +n.textContent : 0; };
   const gotoView = async (v) => { click(`[data-view="${v}"]`); await sleep(150); };
 
-  await sleep(150);
-  const bootCalls = db.calls.slice();
-  check("start-up needs exactly ONE data request (bootstrap) - no config/counts/list round trips",
-    bootCalls.filter((c) => c.includes("/api/bootstrap")).length === 1 &&
-    !bootCalls.some((c) => /\/api\/(config|counts|messages\?)/.test(c)));
-  check("skeleton rows are replaced by the real list as soon as the data arrives", $$("#rows .skel").length === 0 && $("#rows").children.length > 0);
-  check("branding is requested once, after the first screen (not in parallel with the data)",
-    bootCalls.filter((c) => c.includes("/api/branding")).length === 1 && bootCalls.findIndex((c) => c.includes("/api/branding")) > bootCalls.findIndex((c) => c.includes("/api/bootstrap")));
-  check("no sync is fired during start-up (it is deferred until the screen is usable)", !bootCalls.some((c) => c.includes("/api/sync")));
+  await sleep(100);
   check("app boots with the five folders, each with an icon",
     $$(".nav button").length === 5 && $$(".nav button .ic svg").length === 5 && $("#boxes").children.length === 3);
 
@@ -207,11 +179,7 @@ const check = (name, cond) => { console.log((cond ? "PASS " : "FAIL ") + name); 
   await gotoView("starred");
   check("Starred folder lists only starred mail", ids().join() === "502");
   await gotoView("inbox");
-  const unreadBefore = badge("sales"), callsBefore = db.calls.length;
   await open(502);
-  const openCalls = db.calls.slice(callsBefore).filter((c) => !c.includes("/api/pulse"));
-  check("opening a message costs ONE request and lowers the unread badge locally",
-    openCalls.length === 1 && openCalls[0] === "GET /api/messages/502" && badge("sales") === unreadBefore - 1);
   check("opening a message marks it read in the list + shows reading pane class",
     !row(502).classList.contains("unread") && $("#app").classList.contains("reading") && $("#readerStar").classList.contains("on"));
   check("reader never prints a stray 'null' (missing banner regression)", !/null/.test($("#readerPane").textContent));
@@ -223,13 +191,9 @@ const check = (name, cond) => { console.log((cond ? "PASS " : "FAIL ") + name); 
   // ---------------------------------------------------------------- bulk select, trash, undo
   row(503).querySelector(".chk").click(); row(504).querySelector(".chk").click(); await sleep(30);
   check("selecting rows shows the bulk toolbar", /2 selected/.test($("#toolbar").textContent) && !!tbBtn("Trash") && !!tbBtn("Mark as unread") && !!tbBtn("Star"));
-  const pulsesBefore = db.calls.filter((c) => c.includes("/api/pulse")).length;
   clickEl(tbBtn("Trash")); await sleep(120);
   check("bulk trash removes rows and shows an Undo toast",
     !ids().includes(503) && !ids().includes(504) && /moved to Trash/.test($("#toast").textContent) && !!$("#toast button"));
-  await sleep(900);
-  check("trashing several messages triggers a single counts refresh, not one per message",
-    db.calls.filter((c) => c.includes("/api/pulse")).length === pulsesBefore + 1);
   clickEl($("#toast button")); await sleep(250);
   check("Undo restores both messages", ids().includes(503) && ids().includes(504) && !MAIL.find((m) => m.id === 503).deleted);
 
@@ -288,22 +252,6 @@ const check = (name, cond) => { console.log((cond ? "PASS " : "FAIL ") + name); 
   key("j");  // typing in compose must never trigger list shortcuts
   check("shortcuts are ignored while composing", !!$("#cTo"));
   click("#cDiscard"); await sleep(100);
-
-  // ---------------------------------------------------------------- new mail arrives (stored by the webhook) -> pulse shows it
-  await gotoView("inbox"); await gotoBox("sales");
-  await sleep(1000);                       // let the previous action's coalesced counts refresh finish first
-  const beforeNew = badge("sales");
-  MAIL.push(mk(9000, "sales", "Fresh arrival", { created_at: new Date().toISOString() }));
-  const callsBeforeNew = db.calls.length;
-  w.document.dispatchEvent(new w.Event("visibilitychange")); await sleep(400);
-  const newMailCalls = db.calls.slice(callsBeforeNew).map((c) => c.split("?")[0]);
-  check("new mail appears in the open inbox without a manual sync", ids()[0] === 9000 && /New mail/.test($("#toast").textContent));
-  check("the unread badge rises by one", badge("sales") === beforeNew + 1);
-  check("finding new mail costs exactly two requests: one pulse + one list reload (no sync, no counts calls)",
-    newMailCalls.join() === "GET /api/pulse,GET /api/messages");
-
-  // ---------------------------------------------------------------- the last-used mailbox is remembered
-  check("the chosen mailbox is remembered for next time", w.localStorage.getItem("rtmail.box") === "sales");
 
   check("no unhandled API calls or leftover drafts", !db.calls.some((c) => c.includes("unhandled")) && db.drafts.length === 0);
   console.log(failures ? `\n${failures} FAILED` : "\nALL FRONTEND CHECKS PASSED");

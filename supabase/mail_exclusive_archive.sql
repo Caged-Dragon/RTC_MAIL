@@ -1,7 +1,4 @@
--- HISTORICAL: applied to the prior Supabase project "RtCrackers Cart" (ypmiinmkyvzdpakbkers) on 2026-10-11.
--- It has NOT been verified or applied to the newly supplied project ybvsjuyznkdwvrnjnelr.
--- Do NOT run this project-specific archive/policy script on another project just to connect mail;
--- it changes constraints, triggers, RLS policies, and customer_addresses policies and requires a full review.
+-- APPLIED to Supabase project "RtCrackers Cart" (ypmiinmkyvzdpakbkers) on 2026-10-11.
 -- Purpose: company mail lives ONLY in this system.
 --   1) mailboxes / business addresses can only be @rtcrackers.com
 --   2) append-only archive of every message ever received or sent (survives "Delete forever")

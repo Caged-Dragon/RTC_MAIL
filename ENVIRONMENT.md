@@ -1,14 +1,10 @@
 # Mail website environment variables
 
-The supplied Supabase project URL below is public configuration. Keep all keys and the database connection string private.
-
 ```env
 RESEND_API_KEY=YOUR_RESEND_API_KEY
 RESEND_WEBHOOK_SECRET=YOUR_RESEND_WEBHOOK_SECRET
 MAIL_DOMAIN=rtcrackers.com
-MAILBOX_ORDER=admin,sales,support,account,noreply,billing,contact,help,info,orders
 DATABASE_URL=YOUR_SUPABASE_POOLER_CONNECTION_STRING
-SUPABASE_PROJECT_REF=ypmiinmkyvzdpakbkers
 SUPABASE_URL=https://ypmiinmkyvzdpakbkers.supabase.co
 SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 SYNC_BUDGET_SECONDS=45
@@ -18,6 +14,20 @@ ORDER_SITE_URL=https://YOUR-CART-DOMAIN
 ADMIN_SITE_URL=https://YOUR-ADMIN-DOMAIN
 ```
 
-The Supabase organization ID you first supplied (`ybvsjuyznkdwvrnjnelr`) is not a project reference. The connected Supabase project is **RtCrackers Cart**, project ref `ypmiinmkyvzdpakbkers`, with URL `https://ypmiinmkyvzdpakbkers.supabase.co`. The `DATABASE_URL` and `SUPABASE_ANON_KEY` must come from that same project and be configured server-side. Do not reuse connection credentials from another Supabase project. Keep the Resend key, webhook secret, and database connection string server-side only. `MAILBOX_ORDER` is only a visual sorting preference; the app discovers every active address for `MAIL_DOMAIN` from the database, including addresses not named in that list.
+Keep the Resend key, webhook secret, and database connection string server-side only.
 
-`MAIL_ADMIN_EMAIL` is optional (defaults to `admin@<MAIL_DOMAIN>`). `MAIL_DEV_NO_AUTH=1` disables login for local development only and is ignored on Vercel.
+Sign-in: **every active admin ID in the `admin_access` table can sign in** (the same Supabase IDs as admin.rtcrackers.com). `MAIL_ADMIN_EMAIL` is no longer a gate and can be removed.
+
+`MAIL_ALLOWED_MX` (optional) = comma-separated regular expressions for MX hosts allowed to hold company mail; default is Resend's inbound server (`^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$`).
+
+`MAIL_ADMIN_EMAIL` is optional legacy. `MAIL_DEV_NO_AUTH=1` disables login for local development only and is ignored on Vercel.
+
+
+## Automatic e-mail (new)
+| Variable | Meaning |
+|---|---|
+| `MAIL_CART_URL` | Shop address used in links inside automatic mail (default `https://cart.rtcrackers.com`) |
+| `MAIL_AUTO_REPLY_BOXES` | Mailboxes that acknowledge new customers automatically (default `support,contact,help`) |
+| `OUTBOX_SECRET` | Optional. If set, `POST /api/outbox/run` needs this secret. Then also run in Supabase: `update private.mail_runtime_config set value = '<same secret>' where key = 'outbox_secret';` |
+
+Your Resend API key must have **Full access** (not "Sending access"): reading received mail needs it. Create a new key in Resend → API Keys → Permission: Full access.

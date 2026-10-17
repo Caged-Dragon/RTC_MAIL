@@ -25,24 +25,31 @@ RESEND_API_KEY = _env("RESEND_API_KEY")
 RESEND_WEBHOOK_SECRET = _env("RESEND_WEBHOOK_SECRET")
 MAIL_DOMAIN = _env("MAIL_DOMAIN", "rtcrackers.com").lower()
 DATABASE_URL = _env("DATABASE_URL")
-SUPABASE_PROJECT_REF = _env("SUPABASE_PROJECT_REF", "ypmiinmkyvzdpakbkers").lower()
-SUPABASE_URL = _env("SUPABASE_URL", f"https://{SUPABASE_PROJECT_REF}.supabase.co").rstrip("/")
+SUPABASE_URL = _env("SUPABASE_URL").rstrip("/")
 SUPABASE_ANON_KEY = _env("SUPABASE_ANON_KEY")
 SYNC_BUDGET_SECONDS = _env_float("SYNC_BUDGET_SECONDS", 45.0)
 
-# The only account allowed to sign in to the portal (and to be treated as admin).
+# Kept for backwards compatibility only. Sign-in is no longer limited to this address:
+# every ACTIVE row in public.admin_access (matched by Supabase auth user id) may enter.
 ADMIN_EMAIL = _env("MAIL_ADMIN_EMAIL", f"admin@{MAIL_DOMAIN}").lower()
+
+# MX hosts that are allowed to hold company mail (regular expressions, comma separated).
+# Default = Resend's inbound servers (AWS SES inbound). Anything else is reported as a leak.
+ALLOWED_MX = [x.strip() for x in _env("MAIL_ALLOWED_MX", r"^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$").split(",") if x.strip()]
 
 # Local-only escape hatch; can never be enabled on Vercel.
 DEV_NO_AUTH = _env("MAIL_DEV_NO_AUTH") == "1" and not os.getenv("VERCEL")
 
-# Optional display-order preference only. This list never limits which addresses become mailboxes.
-# Every active address in business_email_addresses for MAIL_DOMAIN is discoverable.
-_DEFAULT_MAILBOX_ORDER = (
+REQUIRED_LOCALS = [
     "admin", "sales", "support", "account", "noreply",
     "billing", "contact", "help", "info", "orders",
-)
-MAILBOX_ORDER = [
-    part.strip().lower() for part in _env("MAILBOX_ORDER", ",".join(_DEFAULT_MAILBOX_ORDER)).split(",")
-    if part.strip()
 ]
+
+
+# --- Automatic e-mail -------------------------------------------------------------------------------
+CART_URL = _env("MAIL_CART_URL", "https://cart.rtcrackers.com").rstrip("/")
+# Optional shared secret for POST /api/outbox/run. If set, the same value must be stored in the database:
+#   update private.mail_runtime_config set value = '<secret>' where key = 'outbox_secret';
+OUTBOX_SECRET = _env("OUTBOX_SECRET", "")
+# Mailboxes that answer new customers with an automatic "we received your message".
+AUTO_REPLY_BOXES = [x.strip().lower() for x in _env("MAIL_AUTO_REPLY_BOXES", "support,contact,help").split(",") if x.strip()]
